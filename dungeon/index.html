@@ -26,7 +26,9 @@
   #inventory { margin-top: 4px; color: #aaa; white-space: pre; }
   #log {
     width: 960px;
-    height: 7.5em;
+    /* Room for the 6 messages the log keeps (6 lines of 1.25em), plus the
+       4px padding top and bottom and the 1px border: border-box counts those too. */
+    height: calc(6 * 1.25em + 2 * 4px + 2 * 1px);
     margin-top: 6px;
     padding: 4px 8px;
     box-sizing: border-box;
