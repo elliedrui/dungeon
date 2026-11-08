@@ -227,50 +227,249 @@ function addMessage(text, color = MSG.info) {
 }
 
 // ---------- Sound ----------
-// Every sound is made on the fly with the Web Audio API: an oscillator (a tone
-// generator) fed through a volume control that fades out. No audio files needed.
-let audio = null;
+// Every sound is made on the fly with the Web Audio API, so no audio files are
+// needed. Each sound is built by layering two kinds of pieces:
+//   tone()  - a note from an oscillator (a tone generator)
+//   noise() - a burst of hiss, which a filter shapes into a thump, whoosh or crackle
+// Most sounds also nudge their pitch a little at random (see vary), so hitting
+// the same rat five times doesn't play the exact same sound five times.
+// To try every sound, open the game as index.html#sounds (see the end of the script).
+let audio = null;         // the AudioContext, made on the first sound (browsers only allow audio after a key press)
+let output = null;        // where every sound goes: a compressor, so loud layers don't distort
+let noiseBuffer = null;   // one second of random samples, shared by every noise()
 let muted = false;
 try { muted = localStorage.getItem(MUTE_KEY) === '1'; } catch {}
 
-// Plays one tone. `slideTo` bends the pitch over its length; `delay` is in seconds.
-function tone(freq, duration, type = 'square', volume = 0.06, slideTo = null, delay = 0) {
+function audioOut() {
+  if (!audio) {
+    audio = new AudioContext();
+    output = audio.createDynamicsCompressor();
+    output.connect(audio.destination);
+    noiseBuffer = audio.createBuffer(1, audio.sampleRate, audio.sampleRate);
+    const samples = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < samples.length; i++) samples[i] = Math.random() * 2 - 1;
+  }
+  return output;
+}
+
+// A number close to 1, e.g. 0.93 or 1.06. Multiply a pitch by it to vary the sound.
+function vary(amount = 0.08) {
+  return 1 + (Math.random() * 2 - 1) * amount;
+}
+
+// Fades a sound in over `attack` seconds, then out until `duration`. Starting
+// from silence instead of full volume avoids a click at the start.
+function envelope(gain, t, volume, attack, duration) {
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.exponentialRampToValueAtTime(volume, t + attack);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+}
+
+// A filter keeps only part of a sound: 'lowpass' keeps the low end (muffled),
+// 'highpass' the high end (thin, crackly), 'bandpass' a slice in between.
+// `freq` is where it cuts, `to` sweeps that point over the sound, `q` sharpens it.
+function makeFilter({ type, freq, to = null, q = 1 }, t, duration) {
+  const filter = audio.createBiquadFilter();
+  filter.type = type;
+  filter.frequency.setValueAtTime(freq, t);
+  if (to) filter.frequency.exponentialRampToValueAtTime(to, t + duration);
+  filter.Q.value = q;
+  return filter;
+}
+
+// Plays one note. All times are in seconds.
+//   freq, to - starting pitch, and the pitch it slides to (optional)
+//   type     - wave shape: 'sine' (soft), 'triangle', 'square' or 'sawtooth' (buzzy)
+//   wobble   - {rate, depth}: makes the pitch waver, for magic and dizziness
+function tone({ freq, to = null, type = 'square', duration = 0.1, volume = 0.06, delay = 0,
+                attack = 0.005, filter = null, wobble = null }) {
   if (muted) return;
   try {
-    audio ??= new AudioContext();   // browsers only allow audio after a key press or click
+    const out = audioOut();
     const t = audio.currentTime + delay;
     const osc = audio.createOscillator();
-    const gain = audio.createGain();
     osc.type = type;
     osc.frequency.setValueAtTime(freq, t);
-    if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t + duration);
-    gain.gain.setValueAtTime(volume, t);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
-    osc.connect(gain).connect(audio.destination);
+    if (to) osc.frequency.exponentialRampToValueAtTime(to, t + duration);
+    if (wobble) {
+      const lfo = audio.createOscillator();   // a slow, silent oscillator that bends the pitch
+      const depth = audio.createGain();
+      lfo.frequency.value = wobble.rate;
+      depth.gain.value = wobble.depth;
+      lfo.connect(depth).connect(osc.frequency);
+      lfo.start(t);
+      lfo.stop(t + duration);
+    }
+    const gain = audio.createGain();
+    envelope(gain, t, volume, attack, duration);
+    const shaped = filter ? osc.connect(makeFilter(filter, t, duration)) : osc;
+    shaped.connect(gain).connect(out);
     osc.start(t);
     osc.stop(t + duration);
+  } catch {}   // no audio (blocked, or an old browser): the game works silently
+}
+
+// Plays a burst of noise, shaped by `filter`. Same options as tone(), minus pitch.
+function noise({ duration = 0.1, volume = 0.2, delay = 0, attack = 0.005, filter = null }) {
+  if (muted) return;
+  try {
+    const out = audioOut();
+    const t = audio.currentTime + delay;
+    const source = audio.createBufferSource();
+    source.buffer = noiseBuffer;
+    source.loop = true;
+    const gain = audio.createGain();
+    envelope(gain, t, volume, attack, duration);
+    const shaped = filter ? source.connect(makeFilter(filter, t, duration)) : source;
+    shaped.connect(gain).connect(out);
+    source.start(t, Math.random() * 0.5);   // start somewhere random in the noise
+    source.stop(t + duration);
   } catch {}
 }
 
+// Every sound in the game. Each one is a function: SOUNDS.hit() plays a hit.
 const SOUNDS = {
-  hit:    () => tone(220, 0.08, 'square', 0.05, 110),
-  miss:   () => tone(150, 0.05, 'triangle', 0.04),
-  hurt:   () => tone(130, 0.18, 'sawtooth', 0.06, 60),
-  kill:   () => { tone(330, 0.08); tone(440, 0.12, 'square', 0.05, null, 0.08); },
-  pickup: () => tone(660, 0.08, 'triangle', 0.07, 990),
-  drink:  () => tone(300, 0.3, 'sine', 0.1, 900),
-  zap:    () => tone(1400, 0.25, 'sawtooth', 0.05, 80),
-  fire:   () => { tone(500, 0.35, 'sawtooth', 0.06, 70); tone(90, 0.4, 'square', 0.05, 40); },
-  warp:   () => tone(200, 0.4, 'sine', 0.1, 1200),
-  stairs: () => [392, 330, 262].forEach((f, i) => tone(f, 0.15, 'triangle', 0.08, null, i * 0.12)),
-  death:  () => tone(300, 0.9, 'sawtooth', 0.07, 40),
-  win:    () => [262, 330, 392, 523].forEach((f, i) => tone(f, 0.22, 'square', 0.05, null, i * 0.15)),
+  // ----- Fighting -----
+  hit: () => {   // you land a blow: a thump with a low knock under it
+    const p = vary();
+    noise({ duration: 0.09, volume: 0.25, filter: { type: 'bandpass', freq: 1400 * p, to: 300, q: 1.2 } });
+    tone({ freq: 180 * p, to: 70, duration: 0.1, volume: 0.08, filter: { type: 'lowpass', freq: 900 } });
+  },
+  miss: () => noise({   // a swish through empty air
+    duration: 0.16, volume: 0.12, attack: 0.03,
+    filter: { type: 'bandpass', freq: 2500 * vary(), to: 700, q: 2 },
+  }),
+  hurt: () => {   // you get hit: heavier and lower than your own hits
+    const p = vary();
+    noise({ duration: 0.18, volume: 0.3, filter: { type: 'lowpass', freq: 900 * p, to: 150 } });
+    tone({ freq: 240 * p, to: 80, type: 'sawtooth', duration: 0.22, volume: 0.06,
+           filter: { type: 'lowpass', freq: 1000 } });
+  },
+  kill: () => {   // a hit, then two bright notes going up
+    SOUNDS.hit();
+    tone({ freq: 523, type: 'triangle', duration: 0.1, volume: 0.07, delay: 0.07 });
+    tone({ freq: 784, type: 'triangle', duration: 0.16, volume: 0.07, delay: 0.14 });
+  },
+  spotted: () => {   // a monster wakes up and sees you: a low, buzzy "uh-oh"
+    // Two notes a tritone apart, played together: a tense sound, unlike the
+    // bright rising notes of good things like pickup.
+    const p = vary(0.03);
+    noise({ duration: 0.05, volume: 0.15, filter: { type: 'bandpass', freq: 1500, q: 2 } });
+    for (const freq of [220, 311])
+      tone({ freq: freq * p, type: 'sawtooth', duration: 0.16, volume: 0.05, filter: { type: 'lowpass', freq: 1400 } });
+  },
+
+  // ----- Items -----
+  pickup: () => {   // a bright two-note "bling"
+    tone({ freq: 880, type: 'triangle', duration: 0.07, volume: 0.07 });
+    tone({ freq: 1319, type: 'triangle', duration: 0.12, volume: 0.07, delay: 0.06 });
+  },
+  deny: () => tone({   // a soft low "nope" when something can't be done
+    freq: 140, type: 'triangle', duration: 0.12, volume: 0.08, filter: { type: 'lowpass', freq: 600 },
+  }),
+  drink: () => [0, 0.09, 0.18].forEach((delay, i) => tone({   // three gulps
+    freq: (260 + i * 70) * vary(0.05), to: 420 + i * 90, type: 'sine', duration: 0.08, volume: 0.12, delay,
+  })),
+  heal: () => [523, 659, 784].forEach((freq, i) => tone({   // a warm, shimmering chord
+    freq, type: 'sine', duration: 0.5, volume: 0.06, delay: 0.25 + i * 0.06, attack: 0.05,
+    wobble: { rate: 6, depth: 4 },
+  })),
+  buff: () => {   // strength or defense: a rising "power up"
+    tone({ freq: 220, to: 880, duration: 0.35, volume: 0.05, delay: 0.25, filter: { type: 'lowpass', freq: 1500 } });
+    tone({ freq: 880, type: 'triangle', duration: 0.25, volume: 0.06, delay: 0.58 });
+  },
+  throw: () => noise({   // a potion flying
+    duration: 0.18, volume: 0.1, attack: 0.04, filter: { type: 'bandpass', freq: 800, to: 2400, q: 2 },
+  }),
+  smash: () => {   // glass breaking: a crack plus a few tinkling shards
+    // It always follows a throw, so it waits for the whoosh to land first.
+    noise({ duration: 0.2, volume: 0.25, delay: 0.15, filter: { type: 'highpass', freq: 3000 } });
+    for (let i = 0; i < 4; i++)
+      tone({ freq: 2000 + Math.random() * 2000, type: 'triangle', duration: 0.06, volume: 0.03,
+             delay: 0.17 + i * 0.04 * vary(0.5) });
+  },
+  wind: () => {   // the whirlwind: two gusts sweeping up and back down
+    noise({ duration: 0.7, volume: 0.35, attack: 0.15, filter: { type: 'bandpass', freq: 300, to: 1800, q: 3 } });
+    noise({ duration: 0.6, volume: 0.25, attack: 0.15, delay: 0.1,
+            filter: { type: 'bandpass', freq: 2600, to: 500, q: 3 } });
+  },
+  zap: () => {   // lightning: a crackle, a falling buzz, and a second crackle
+    noise({ duration: 0.3, volume: 0.2, filter: { type: 'highpass', freq: 2500 } });
+    tone({ freq: 1600, to: 90, type: 'sawtooth', duration: 0.25, volume: 0.05 });
+    noise({ duration: 0.15, volume: 0.15, delay: 0.12, filter: { type: 'highpass', freq: 4000 } });
+  },
+  magic: () => [880, 1175, 1568, 2093].forEach((freq, i) => tone({   // reading the mapping scroll: twinkly notes
+    freq, type: 'sine', duration: 0.3, volume: 0.04, delay: i * 0.06, wobble: { rate: 8, depth: 6 },
+  })),
+
+  // ----- The old woman's spells -----
+  teleport: () => {   // pulled back to floor 1: a long fall
+    tone({ freq: 1400, to: 120, type: 'sine', duration: 0.8, volume: 0.1, wobble: { rate: 12, depth: 30 } });
+    noise({ duration: 0.8, volume: 0.1, attack: 0.1, filter: { type: 'bandpass', freq: 3000, to: 300, q: 2 } });
+  },
+  confuse: () => {   // two notes slightly out of tune, wobbling: dizzy
+    tone({ freq: 440, type: 'sine', duration: 0.9, volume: 0.06, attack: 0.05, wobble: { rate: 5, depth: 40 } });
+    tone({ freq: 466, type: 'sine', duration: 0.9, volume: 0.06, attack: 0.05, wobble: { rate: 4, depth: 40 } });
+  },
+  forget: () => tone({   // your map fades: a sinking, wavering note
+    freq: 900, to: 220, type: 'sine', duration: 1, volume: 0.07, attack: 0.1,
+    wobble: { rate: 7, depth: 15 }, filter: { type: 'lowpass', freq: 1500 },
+  }),
+  summon: () => {   // something crawls out of nowhere: a low growl and a puff
+    tone({ freq: 70, to: 140, type: 'sawtooth', duration: 0.6, volume: 0.1, attack: 0.1,
+           filter: { type: 'lowpass', freq: 500 } });
+    noise({ duration: 0.5, volume: 0.2, attack: 0.2, filter: { type: 'lowpass', freq: 400, to: 1200 } });
+  },
+
+  // ----- The dark wizard -----
+  bossWake: () => {   // a deep, ominous drone: two low notes slightly apart
+    for (const freq of [55, 58.3])
+      tone({ freq, type: 'sawtooth', duration: 1.8, volume: 0.09, attack: 0.4, filter: { type: 'lowpass', freq: 350 } });
+    tone({ freq: 110, type: 'sine', duration: 1.8, volume: 0.05, attack: 0.4 });
+  },
+  fire: () => {   // a fire bolt: a roaring whoosh over a low rumble
+    noise({ duration: 0.45, volume: 0.4, attack: 0.05, filter: { type: 'lowpass', freq: 300, to: 3000 } });
+    tone({ freq: 90, to: 50, type: 'sawtooth', duration: 0.5, volume: 0.08, filter: { type: 'lowpass', freq: 300 } });
+  },
+  roar: () => {   // it flies into a rage
+    for (const freq of [65, 98])
+      tone({ freq, to: freq * 1.7, type: 'sawtooth', duration: 0.9, volume: 0.1,
+             filter: { type: 'lowpass', freq: 700 }, wobble: { rate: 18, depth: 8 } });
+    noise({ duration: 0.8, volume: 0.2, attack: 0.1, filter: { type: 'lowpass', freq: 600 } });
+  },
+
+  // ----- Progress -----
+  stairs: () => {   // three footsteps going down, then a falling tune
+    [0, 0.16, 0.32].forEach((delay, i) => noise({
+      duration: 0.08, volume: 0.3, delay, filter: { type: 'lowpass', freq: 500 - i * 100 },
+    }));
+    [392, 330, 262].forEach((freq, i) => tone({ freq, type: 'triangle', duration: 0.15, volume: 0.07, delay: 0.45 + i * 0.12 }));
+  },
+  levelUp: () => [523, 659, 784, 1047].forEach((freq, i) => tone({   // you got stronger on the stairs
+    freq, type: 'triangle', duration: 0.2, volume: 0.06, delay: 0.85 + i * 0.08,
+  })),
+  clear: () => {   // the last monster on a floor dies: a two-note chime
+    tone({ freq: 784, type: 'triangle', duration: 0.4, volume: 0.06, delay: 0.25, wobble: { rate: 6, depth: 3 } });
+    tone({ freq: 1047, type: 'triangle', duration: 0.6, volume: 0.06, delay: 0.4, wobble: { rate: 6, depth: 3 } });
+  },
+  death: () => {   // a long, sinking groan
+    tone({ freq: 300, to: 40, type: 'sawtooth', duration: 1.2, volume: 0.09, filter: { type: 'lowpass', freq: 1200, to: 200 } });
+    noise({ duration: 0.6, volume: 0.2, filter: { type: 'lowpass', freq: 400 } });
+  },
+  win: () => {   // a little fanfare ending on a chord
+    [262, 330, 392, 523].forEach((freq, i) => tone({
+      freq, duration: 0.22, volume: 0.05, delay: i * 0.15, filter: { type: 'lowpass', freq: 2000 },
+    }));
+    for (const freq of [523, 659, 784])
+      tone({ freq, type: 'triangle', duration: 1, volume: 0.06, delay: 0.65, attack: 0.02 });
+  },
 };
 
 function toggleMute() {
   muted = !muted;
   try { localStorage.setItem(MUTE_KEY, muted ? '1' : '0'); } catch {}
   addMessage(muted ? 'Sound off.' : 'Sound on.');
+  SOUNDS.pickup();   // so you can hear that it's back on (it does nothing when muted)
 }
 
 function toggleGraphics() {
@@ -551,6 +750,7 @@ function startFloor() {
 function descend() {
   if (!stairs || player.x !== stairs.x || player.y !== stairs.y) {
     addMessage('There are no stairs here.');
+    SOUNDS.deny();
     return;
   }
   depth++;
@@ -562,6 +762,7 @@ function descend() {
     player.atk += 1;
     player.def += 1;
     player.hp = Math.min(player.maxHp, player.hp + 10);
+    SOUNDS.levelUp();
     addMessage('You rest on the stairs: +5 max HP, +1 ATK, +1 DEF, and you recover some HP.', MSG.good);
   } else {
     addMessage('You head back down. You have been this deep before.');
@@ -648,8 +849,11 @@ function killMonster(m) {
     SOUNDS.win();
     return;
   }
-  if (monsters.length === 0) addMessage('This floor is clear. Find the stairs down (>).', MSG.good);
   SOUNDS.kill();
+  if (monsters.length === 0) {
+    addMessage('This floor is clear. Find the stairs down (>).', MSG.good);
+    SOUNDS.clear();
+  }
 }
 
 // Hurts the player for `damage`, ignoring defense. `source` names what did it,
@@ -702,6 +906,7 @@ function pickUpItem() {
   const name = itemName(item.type);
   if (inventory.length >= INVENTORY_SIZE) {
     addMessage(`You see ${withArticle(name)}, but your pack is full.`);
+    SOUNDS.deny();
     return;
   }
   items = items.filter(i => i !== item);
@@ -721,6 +926,7 @@ function useItem(slot) {
     // unknown one would give away what it is.
     if (type === 'healing' && identified.includes('healing') && player.hp >= player.maxHp) {
       addMessage("You're already at full health.");
+    SOUNDS.deny();
       return false;
     }
     t.use();
@@ -744,6 +950,7 @@ function drinkHealing() {
   const healed = Math.min(POTION_HEAL, player.maxHp - player.hp);
   player.hp += healed;
   SOUNDS.drink();
+  SOUNDS.heal();
   if (healed > 0) addMessage(`Warmth spreads through you. You recover ${healed} HP.`, MSG.good);
   else addMessage('You feel refreshed, but you were already at full health.');
 }
@@ -751,18 +958,21 @@ function drinkHealing() {
 function drinkStrength() {
   player.atk += 1;
   SOUNDS.drink();
+  SOUNDS.buff();
   addMessage('Power surges through your arms! +1 ATK.', MSG.good);
 }
 
 function drinkDefense() {
   player.def += 1;
   SOUNDS.drink();
+  SOUNDS.buff();
   addMessage('Your skin hardens like bark! +1 DEF.', MSG.good);
 }
 
 // A whirlwind spins out from you and blows away every monster next to you.
 function drinkWhirlwind() {
-  SOUNDS.warp();
+  SOUNDS.drink();
+  SOUNDS.wind();
   const next = monsters.filter(m => Math.abs(m.x - player.x) + Math.abs(m.y - player.y) === 1);
   for (const m of next) blowBack(m, m.x - player.x, m.y - player.y);
   if (next.length > 0) addMessage('A whirlwind bursts out of you and flings your enemies away!', MSG.magic);
@@ -772,6 +982,7 @@ function drinkWhirlwind() {
 function drinkPoison() {
   const damage = randInt(6, 10);
   addMessage(`Ugh! The potion burns your throat. You lose ${damage} HP.`, MSG.bad);
+  SOUNDS.drink();
   hurtPlayer(damage, 'potion of poison');
 }
 
@@ -783,6 +994,7 @@ let throwing = null;   // not saved: a reloaded game is never halfway through a 
 function startThrow() {
   if (!inventory.some(type => ITEM_TYPES[type].potion)) {
     addMessage('You have no potions to throw.');
+    SOUNDS.deny();
     return;
   }
   throwing = { slot: null };
@@ -825,6 +1037,7 @@ function throwPotion(slot, dx, dy) {
   const type = inventory[slot];
   const name = itemName(type);
   inventory.splice(slot, 1);
+  SOUNDS.throw();
   let x = player.x, y = player.y;
   for (let i = 0; i < THROW_RANGE && map[y + dy][x + dx] === FLOOR; i++) {
     x += dx;
@@ -832,6 +1045,7 @@ function throwPotion(slot, dx, dy) {
     const m = monsterAt(x, y);
     if (m) {
       addMessage(`The ${name} smashes on the ${m.name}!`, MSG.item);
+      SOUNDS.smash();
       m.awake = true;
       ITEM_TYPES[type].splash(m, dx, dy);
       identify(type);   // you saw what it did
@@ -839,7 +1053,7 @@ function throwPotion(slot, dx, dy) {
     }
   }
   addMessage(`The ${name} smashes on the floor. What a waste.`);
-  SOUNDS.miss();
+  SOUNDS.smash();
 }
 
 // Poison hurts as much as drinking it does. Armor doesn't help against fumes.
@@ -854,26 +1068,26 @@ function splashPoison(m) {
 function splashHealing(m) {
   m.hp = MONSTER_TYPES[m.name].hp;
   addMessage(`Oops. The ${m.name}'s wounds close up.`, MSG.warn);
-  SOUNDS.drink();
+  SOUNDS.heal();
 }
 
 function splashStrength(m) {
   m.atk += 1;
   addMessage(`Oops. The ${m.name} looks stronger!`, MSG.warn);
-  SOUNDS.drink();
+  SOUNDS.buff();
 }
 
 function splashDefense(m) {
   m.def += 1;
   addMessage(`Oops. The ${m.name}'s skin hardens!`, MSG.warn);
-  SOUNDS.drink();
+  SOUNDS.buff();
 }
 
 // The monster flies on in the direction the potion was going.
 function splashWhirlwind(m, dx, dy) {
   blowBack(m, dx, dy);
   addMessage(`A gust of wind hurls the ${m.name} back!`, MSG.magic);
-  SOUNDS.warp();
+  SOUNDS.wind();
 }
 
 // Pushes monster m up to WHIRLWIND_PUSH tiles in direction (dx, dy). It stops
@@ -891,7 +1105,7 @@ function blowBack(m, dx, dy) {
 function readMapping() {
   explored = map.map(row => row.map(() => true));
   addMessage('The layout of this floor fills your mind. Press M to see the map.', MSG.magic);
-  SOUNDS.pickup();
+  SOUNDS.magic();
   return true;
 }
 
@@ -905,6 +1119,7 @@ function readLightning() {
   }
   if (!target) {
     addMessage('No enemy in sight. You keep the scroll.');
+    SOUNDS.deny();
     return false;
   }
   target.hp -= LIGHTNING_DAMAGE;
@@ -946,9 +1161,11 @@ function monstersTurn() {
       m.awake = true;
       if (isBoss(m)) {
         addMessage(`The ${m.name} turns to face you. "So, another fool comes to die."`, MSG.warn);
+        SOUNDS.bossWake();
       } else {
         const spotter = withArticle(m.name);
         addMessage(`${spotter[0].toUpperCase()}${spotter.slice(1)} spots you!`, MSG.warn);
+        SOUNDS.spotted();
       }
     }
 
@@ -1019,7 +1236,7 @@ function castSpell(m) {
   const roll = randInt(1, 20);
   if (roll <= 2) {
     addMessage(`The ${m.name} mutters a spell. You're pulled all the way back up to floor 1!`, MSG.magic);
-    SOUNDS.warp();
+    SOUNDS.teleport();
     depth = 1;
     startFloor();   // a brand-new floor 1; you keep your pack and stats
     return true;
@@ -1027,20 +1244,20 @@ function castSpell(m) {
   if (roll <= 4) {
     player.hp = player.maxHp;
     addMessage(`The ${m.name} waves her hand. Your wounds close up completely!`, MSG.good);
-    SOUNDS.drink();
+    SOUNDS.heal();
     return true;
   }
   if (roll <= 6) {
     player.confused = CONFUSED_MOVES;
     addMessage(`The ${m.name} cackles. The room spins, and you feel dizzy and confused!`, MSG.bad);
-    SOUNDS.warp();
+    SOUNDS.confuse();
     return true;
   }
   if (roll <= 8) {
     explored = map.map(row => row.map(() => false));
     computeFOV();   // you still remember what's in front of you
     addMessage(`The ${m.name} whispers. Your memory of this floor fades away...`, MSG.bad);
-    SOUNDS.warp();
+    SOUNDS.forget();
     return true;
   }
   if (roll <= 10) return summon(m, ['rat', 'bat']);
@@ -1054,7 +1271,7 @@ function bossTurn(m, dist) {
   if (!m.enraged && m.hp <= MONSTER_TYPES[m.name].hp / 2) {
     m.enraged = true;
     addMessage(`The ${m.name} shrieks with rage! Dark power crackles through the air.`, MSG.warn);
-    SOUNDS.warp();
+    SOUNDS.roar();
   }
   const actions = m.enraged ? 2 : 1;
   for (let i = 0; i < actions && !gameOver; i++) {
@@ -1092,7 +1309,7 @@ function summon(m, kinds) {
   }
   if (count === 0) return false;
   addMessage(`The ${m.name} calls out, and ${count === 1 ? 'a creature appears' : 'creatures appear'} at its side!`, MSG.warn);
-  SOUNDS.warp();
+  SOUNDS.summon();
   return true;
 }
 
@@ -1417,6 +1634,22 @@ function drawEndScreen() {
 // Pick up where you left off if there's a saved game, otherwise start fresh.
 if (!loadGame()) newGame();
 draw();
+
+// ---------- Sound test ----------
+// Open the game as index.html#sounds to get a button for every sound under the
+// game, for trying them out. (globalThis.location is missing when the tests run
+// the game in Node, hence the ?.)
+if (globalThis.location?.hash === '#sounds') {
+  const panel = document.createElement('p');
+  panel.append('Sound test: ');
+  for (const name of Object.keys(SOUNDS)) {
+    const button = document.createElement('button');
+    button.textContent = name;
+    button.onclick = () => SOUNDS[name]();
+    panel.append(button, ' ');
+  }
+  document.body.append(panel);
+}
 </script>
 </body>
 </html>
