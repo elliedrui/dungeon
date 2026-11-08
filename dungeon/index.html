@@ -1,0 +1,1420 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dungeon Crawler</title>
+<style>
+  body {
+    margin: 0;
+    background: #111;
+    color: #ccc;
+    font-family: monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 16px;
+  }
+  canvas {
+    background: #000;
+    image-rendering: pixelated;   /* keep pixel art crisp if the page is zoomed */
+    border: 1px solid #333;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  canvas.hurt { border-color: #f33; box-shadow: 0 0 14px #f33; }   /* flash when hit */
+  p { margin: 8px 0; }
+  #status { margin-top: 8px; font-size: 15px; white-space: pre; }   /* pre keeps the spacing */
+  #inventory { margin-top: 4px; color: #aaa; white-space: pre; }
+  #log {
+    width: 960px;
+    height: 7.5em;
+    margin-top: 6px;
+    padding: 4px 8px;
+    box-sizing: border-box;
+    border: 1px solid #333;
+    line-height: 1.25em;
+    overflow: hidden;
+  }
+  #log div { opacity: 0.55; }             /* older messages fade */
+  #log div:last-child { opacity: 1; }     /* newest message stands out */
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="status"></div>
+<div id="inventory"></div>
+<div id="log"></div>
+<p>Move / attack: arrow keys or WASD &nbsp;·&nbsp; Use item: 1-9 &nbsp;·&nbsp; Throw potion: T &nbsp;·&nbsp; Descend: &gt; or Enter &nbsp;·&nbsp; Wait: space &nbsp;·&nbsp; Map: M &nbsp;·&nbsp; Sound: V &nbsp;·&nbsp; Graphics/text: G &nbsp;·&nbsp; R: new game</p>
+<p style="color:#666">Art: designed with ChatGPT image generation, cut down to 32×32 sprites for this game</p>
+
+<script>
+// ---------- Settings ----------
+const MAP_W = 60;        // map width in tiles
+const MAP_H = 36;        // map height in tiles
+const TILE = 32;         // on-screen size of one tile, in pixels
+const VIEW_W = 30;       // how many tiles fit on screen across...
+const VIEW_H = 18;       // ...and down. The camera follows the player.
+const MAX_ROOMS = 30;    // how many times we *try* to place a room
+const ROOM_MIN = 4;
+const ROOM_MAX = 11;
+const FOV_RADIUS = 8;    // how far the player can see, in tiles
+const MAX_DEPTH = 5;     // the boss waits on this floor: kill it to win
+
+const WALL = '#';
+const FLOOR = '.';
+
+// ---------- Sprites ----------
+// sprites.png is a "sprite sheet": one image holding many 32x32 pictures in a
+// grid, 8 per row. Each picture is picked by its number, counting left to
+// right, top to bottom, starting at 0. To change how something looks, change
+// its number. (sprite-options.png shows every sprite with its number.)
+// The sheet is built from the art by tools/build_sheet.py, outside this folder.
+const SPRITE = 32;       // size of one sprite in the sheet, in pixels
+const SHEET_COLS = 8;    // sprites per row in the sheet
+const SPRITES = {
+  player: 0,  dead: 1,
+  wall: 2,    floor: 3,  floorAlt: 4,  stairs: 5,
+};
+
+// Monster stats. To add a new monster, add a line here.
+// `weight(depth)` is how common it is on a floor: bigger = more common, 0 = never.
+// `moves` is optional and changes how it behaves:
+//   'erratic' - flutters in a random direction half the time
+//   'slow'    - only acts every other turn
+//   'fast'    - acts twice per turn
+//   'phase'   - moves straight at you, right through walls
+//   'spells'  - casts a spell on you now and then (see castSpell)
+//   'boss'    - the final boss's own fighting style (see bossTurn)
+// `boss: true` marks the monster you have to kill to win. It never appears at
+// random: one is placed on the last floor (see spawnBoss).
+const MONSTER_TYPES = {
+  // The weak ones: cannon fodder, mostly on the upper floors.
+  rat:         { ch: 'r', color: '#c96', sprite: 8,  hp: 4,  atk: 2, def: 0, weight: d => Math.max(0, 6 - 2 * d) },
+  'giant rat': { ch: 'R', color: '#aab', sprite: 9,  hp: 6,  atk: 3, def: 0, weight: d => Math.max(0, 5 - d) },
+  bat:         { ch: 'b', color: '#c85', sprite: 10, hp: 3,  atk: 3, def: 0, weight: d => 2, moves: 'erratic' },
+  slime:       { ch: 'j', color: '#4e9', sprite: 11, hp: 10, atk: 3, def: 0, weight: d => d <= 3 ? 2 : 1, moves: 'slow' },
+  spider:      { ch: 's', color: '#b74', sprite: 12, hp: 4,  atk: 2, def: 0, weight: d => d >= 2 ? 2 : 0, moves: 'fast' },
+  crab:        { ch: 'c', color: '#e44', sprite: 13, hp: 6,  atk: 3, def: 2, weight: d => d >= 2 ? 2 : 0 },
+  ghost:       { ch: 'G', color: '#ccd', sprite: 14, hp: 6,  atk: 3, def: 0, weight: d => d >= 3 ? 2 : 0, moves: 'phase' },
+  'old woman': { ch: 'w', color: '#c9f', sprite: 15, hp: 5,  atk: 2, def: 0, weight: d => d >= 2 ? 1 : 0, moves: 'spells' },
+  // The real threats.
+  goblin:      { ch: 'g', color: '#6c6', sprite: 16, hp: 8,  atk: 3, def: 0, weight: d => Math.max(1, 8 - 2 * d) },
+  orc:         { ch: 'o', color: '#d55', sprite: 17, hp: 14, atk: 5, def: 1, weight: d => 2 + d },
+  troll:       { ch: 'T', color: '#b8f', sprite: 18, hp: 24, atk: 7, def: 2, weight: d => d >= 3 ? 2 * (d - 2) : 0 },
+  // The boss.
+  'dark wizard': { ch: 'W', color: '#f6f', sprite: 7,  hp: 45, atk: 5, def: 3, weight: d => 0, moves: 'boss', boss: true },
+};
+
+// The boss's spells. It only casts when you're not standing next to it.
+const BOSS_SPELL_COOLDOWN = 3;   // actions between spells
+const FIREBOLT_MIN = 4;          // fire bolt damage; armor doesn't help against fire
+const FIREBOLT_MAX = 7;
+
+// Item types. `use` returns true if the item was used up (and a turn spent).
+// Potions have no fixed look: see POTION_LOOKS below.
+// `splash(m, dx, dy)` is what a potion does to monster m when you throw it at
+// them; (dx, dy) is the direction it was flying.
+const ITEM_TYPES = {
+  healing:   { name: 'potion of healing',   potion: true, use: drinkHealing,   splash: splashHealing },
+  strength:  { name: 'potion of strength',  potion: true, use: drinkStrength,  splash: splashStrength },
+  defense:   { name: 'potion of defense',   potion: true, use: drinkDefense,   splash: splashDefense },
+  whirlwind: { name: 'potion of whirlwind', potion: true, use: drinkWhirlwind, splash: splashWhirlwind },
+  poison:    { name: 'potion of poison',    potion: true, use: drinkPoison,    splash: splashPoison },
+  scroll:    { name: 'scroll of lightning', ch: '?', color: '#6cf', sprite: 6, use: readLightning },
+  mapping:   { name: 'scroll of mapping',   ch: '?', color: '#fd6', sprite: 6, use: readMapping },
+};
+const INVENTORY_SIZE = 9;   // one slot per number key
+const POTION_HEAL = 12;
+const LIGHTNING_DAMAGE = 12;
+const THROW_RANGE = 6;      // how many tiles a thrown potion can fly
+const WHIRLWIND_PUSH = 3;   // how many tiles a whirlwind blows a monster back
+
+// Unidentified potions: at the start of each run the potion kinds are shuffled
+// onto these looks, so you can't tell what a potion does until you drink one.
+// There must be at least one look per potion kind.
+const POTION_LOOKS = [
+  { adj: 'murky',     sprite: 19, color: '#999' },
+  { adj: 'bubbling',  sprite: 20, color: '#4c8' },
+  { adj: 'crimson',   sprite: 21, color: '#e55' },
+  { adj: 'sparkling', sprite: 22, color: '#5be' },
+  { adj: 'fizzing',   sprite: 23, color: '#f8a' },
+];
+
+// Message log colors, so you can tell what happened at a glance.
+const MSG = {
+  info:  '#999',   // neutral information
+  you:   '#ddd',   // your attacks
+  miss:  '#777',
+  bad:   '#f77',   // you get hurt
+  warn:  '#fa5',   // danger ahead
+  good:  '#8d8',   // healing, progress
+  kill:  '#fd6',
+  item:  '#d9f',
+  magic: '#6cf',
+};
+
+const SAVE_KEY = 'dungeon-crawler-save';
+const MUTE_KEY = 'dungeon-crawler-muted';
+const TEXT_MODE_KEY = 'dungeon-crawler-text-mode';
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+canvas.width = VIEW_W * TILE;
+canvas.height = VIEW_H * TILE;
+
+// Load the sprite sheet. If it's missing, fall back to the text look.
+let useGraphics = true;
+try { useGraphics = localStorage.getItem(TEXT_MODE_KEY) !== '1'; } catch {}
+const sheet = new Image();
+sheet.onload = () => draw();
+sheet.onerror = () => {
+  useGraphics = false;
+  addMessage('Could not load sprites.png, so the game is in text mode.', MSG.warn);
+  draw();
+};
+sheet.src = 'sprites.png';
+
+// ---------- Game state ----------
+let map;        // map[y][x] is WALL or FLOOR
+let rooms;      // list of {x, y, w, h}
+let depth;      // which floor we're on, 1 to MAX_DEPTH
+let stairs;     // {x, y} of the stairs down, or null on the last floor
+let player;     // {x, y, hp, maxHp, atk, def}
+let monsters;   // list of {name, x, y, hp, atk, def, ch, color, awake}
+let items;      // items lying on the floor: list of {type, x, y}
+let inventory;  // item types the player is carrying, e.g. ['healing', 'scroll']
+let potionLooks; // this run's look for each potion kind, e.g. {poison: {adj: 'crimson', ...}}
+let identified; // potion kinds the player has learned, e.g. ['healing']
+let visible;    // visible[y][x] is true if the player can see that tile right now
+let explored;   // explored[y][x] is true if the player has ever seen that tile
+let messages;   // the message log, newest last: list of {text, color}
+let gameOver;   // true once the run has ended, win or lose
+let won;        // true if it ended because every monster is dead
+let stats;      // {turns, kills: {goblin: n, ...}, killedBy} for the end screen
+
+// ---------- Helpers ----------
+function randInt(min, max) {   // inclusive on both ends
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+function roomCenter(r) {
+  return { x: Math.floor(r.x + r.w / 2), y: Math.floor(r.y + r.h / 2) };
+}
+
+// True if two rooms overlap, counting a 1-tile gap so walls never merge.
+function roomsOverlap(a, b) {
+  return a.x - 1 < b.x + b.w && a.x + a.w + 1 > b.x &&
+         a.y - 1 < b.y + b.h && a.y + a.h + 1 > b.y;
+}
+
+function monsterAt(x, y) {
+  return monsters.find(m => m.x === x && m.y === y);
+}
+
+function isBoss(m) {
+  return MONSTER_TYPES[m.name].boss === true;
+}
+
+// "a goblin", "an orc"
+function withArticle(name) {
+  return (/^[aeiou]/.test(name) ? 'an ' : 'a ') + name;
+}
+
+function addMessage(text, color = MSG.info) {
+  messages.push({ text, color });
+  if (messages.length > 6) messages.shift();
+}
+
+// ---------- Sound ----------
+// Every sound is made on the fly with the Web Audio API: an oscillator (a tone
+// generator) fed through a volume control that fades out. No audio files needed.
+let audio = null;
+let muted = false;
+try { muted = localStorage.getItem(MUTE_KEY) === '1'; } catch {}
+
+// Plays one tone. `slideTo` bends the pitch over its length; `delay` is in seconds.
+function tone(freq, duration, type = 'square', volume = 0.06, slideTo = null, delay = 0) {
+  if (muted) return;
+  try {
+    audio ??= new AudioContext();   // browsers only allow audio after a key press or click
+    const t = audio.currentTime + delay;
+    const osc = audio.createOscillator();
+    const gain = audio.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t);
+    if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t + duration);
+    gain.gain.setValueAtTime(volume, t);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+    osc.connect(gain).connect(audio.destination);
+    osc.start(t);
+    osc.stop(t + duration);
+  } catch {}
+}
+
+const SOUNDS = {
+  hit:    () => tone(220, 0.08, 'square', 0.05, 110),
+  miss:   () => tone(150, 0.05, 'triangle', 0.04),
+  hurt:   () => tone(130, 0.18, 'sawtooth', 0.06, 60),
+  kill:   () => { tone(330, 0.08); tone(440, 0.12, 'square', 0.05, null, 0.08); },
+  pickup: () => tone(660, 0.08, 'triangle', 0.07, 990),
+  drink:  () => tone(300, 0.3, 'sine', 0.1, 900),
+  zap:    () => tone(1400, 0.25, 'sawtooth', 0.05, 80),
+  fire:   () => { tone(500, 0.35, 'sawtooth', 0.06, 70); tone(90, 0.4, 'square', 0.05, 40); },
+  warp:   () => tone(200, 0.4, 'sine', 0.1, 1200),
+  stairs: () => [392, 330, 262].forEach((f, i) => tone(f, 0.15, 'triangle', 0.08, null, i * 0.12)),
+  death:  () => tone(300, 0.9, 'sawtooth', 0.07, 40),
+  win:    () => [262, 330, 392, 523].forEach((f, i) => tone(f, 0.22, 'square', 0.05, null, i * 0.15)),
+};
+
+function toggleMute() {
+  muted = !muted;
+  try { localStorage.setItem(MUTE_KEY, muted ? '1' : '0'); } catch {}
+  addMessage(muted ? 'Sound off.' : 'Sound on.');
+}
+
+function toggleGraphics() {
+  if (!sheet.complete || sheet.naturalWidth === 0) {
+    addMessage('Graphics are unavailable: sprites.png did not load.');
+    return;
+  }
+  useGraphics = !useGraphics;
+  try { localStorage.setItem(TEXT_MODE_KEY, useGraphics ? '0' : '1'); } catch {}
+}
+
+// Briefly glows the map's border red.
+function flashHurt() {
+  canvas.classList.add('hurt');
+  setTimeout(() => canvas.classList.remove('hurt'), 150);
+}
+
+// ---------- Saving ----------
+// The game saves to the browser's localStorage after every action. Like most
+// roguelikes, the save is deleted when the run ends: death is permanent.
+function saveGame() {
+  try {
+    if (gameOver) {
+      localStorage.removeItem(SAVE_KEY);
+      return;
+    }
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      map, rooms, depth, stairs, player, monsters, items, inventory, explored, messages, stats,
+      potionLooks, identified,
+    }));
+  } catch {}   // storage can be blocked or full; the game still works without it
+}
+
+// Returns true if a saved game was found and restored.
+function loadGame() {
+  try {
+    const data = JSON.parse(localStorage.getItem(SAVE_KEY));
+    if (!data) return false;
+    ({ map, rooms, depth, stairs, player, monsters, items, inventory, explored, messages, stats,
+       potionLooks, identified } = data);
+    if (!potionLooks) {
+      // A save from before unidentified potions: its plain 'potion's become healing.
+      setUpPotions();
+      const upgrade = type => type === 'potion' ? 'healing' : type;
+      inventory = inventory.map(upgrade);
+      for (const item of items) item.type = upgrade(item.type);
+    }
+    // A save from before a potion kind existed (like defense): give it a free look.
+    giveOutLooks();
+    // The save keeps a copy of each look, sprite number included. Refresh them from
+    // POTION_LOOKS, so a save from before the new sprite sheet draws the right picture.
+    for (const type in potionLooks)
+      potionLooks[type] = POTION_LOOKS.find(look => look.adj === potionLooks[type].adj);
+    // A save from before stats.deepest: the floor you're on is the deepest you know of.
+    stats.deepest ??= depth;
+    // A save from before the boss: the last floor gets one now.
+    if (depth === MAX_DEPTH && !monsters.some(isBoss)) spawnBoss();
+    gameOver = false;
+    won = false;
+    computeFOV();
+    addMessage('Welcome back. Your game was restored.', MSG.good);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ---------- High scores ----------
+// The best runs are kept in localStorage under their own key, so they stay
+// when the saved game is deleted at the end of a run.
+const SCORES_KEY = 'dungeon-crawler-scores';
+const MAX_SCORES = 5;
+let highScores = loadScores();   // best first: list of {score, won, floor, kills, killedBy, date}
+let lastRun = null;              // this run's entry, once it has ended
+let lastRank = null;             // where it landed in highScores (0 = best), or null if it didn't make it
+
+function loadScores() {
+  try {
+    const scores = JSON.parse(localStorage.getItem(SCORES_KEY));
+    return Array.isArray(scores) ? scores : [];
+  } catch {
+    return [];   // missing, broken or blocked storage: start with an empty table
+  }
+}
+
+// Ends the run: `killedBy` names what killed you, or is null if you won.
+// Every way a run ends goes through here, so the score is always recorded.
+function endRun(killedBy) {
+  if (gameOver) return;
+  gameOver = true;
+  won = killedBy === null;
+  stats.killedBy = killedBy;
+  recordScore();
+}
+
+// Score = 100 per floor reached + 10 per kill + 500 for winning.
+function recordScore() {
+  const kills = Object.values(stats.kills).reduce((sum, n) => sum + n, 0);
+  lastRun = {
+    score: 100 * stats.deepest + 10 * kills + (won ? 500 : 0),
+    won, floor: stats.deepest, kills, killedBy: stats.killedBy,
+    date: new Date().toLocaleDateString(),
+  };
+  // Older runs stay ahead on a tie, so a new run has to beat them to pass them.
+  const scores = [...highScores, lastRun].sort((a, b) => b.score - a.score);
+  highScores = scores.slice(0, MAX_SCORES);
+  lastRank = highScores.includes(lastRun) ? highScores.indexOf(lastRun) : null;
+  try { localStorage.setItem(SCORES_KEY, JSON.stringify(highScores)); } catch {}
+}
+
+// One line of the table, e.g. "1.   830  Floor 5, killed by a troll     9 kills  10/21/2026"
+function scoreRow(s, i) {
+  const result = s.won ? 'Victory!' : `Floor ${s.floor}, killed by ${withArticle(s.killedBy)}`;
+  return `${i + 1}. ${String(s.score).padStart(5)}  ${result.padEnd(38)} ${String(s.kills).padStart(3)} kills  ${s.date}`;
+}
+
+// ---------- Dungeon generation ----------
+function carveRoom(r) {
+  for (let y = r.y; y < r.y + r.h; y++)
+    for (let x = r.x; x < r.x + r.w; x++)
+      map[y][x] = FLOOR;
+}
+
+function carveHTunnel(x1, x2, y) {
+  for (let x = Math.min(x1, x2); x <= Math.max(x1, x2); x++) map[y][x] = FLOOR;
+}
+
+function carveVTunnel(y1, y2, x) {
+  for (let y = Math.min(y1, y2); y <= Math.max(y1, y2); y++) map[y][x] = FLOOR;
+}
+
+function generateDungeon() {
+  // Start with solid rock.
+  map = [];
+  for (let y = 0; y < MAP_H; y++) map.push(new Array(MAP_W).fill(WALL));
+  rooms = [];
+
+  for (let i = 0; i < MAX_ROOMS; i++) {
+    const w = randInt(ROOM_MIN, ROOM_MAX);
+    const h = randInt(ROOM_MIN, Math.floor(ROOM_MAX * 0.7));
+    // Keep a 1-tile border of wall around the whole map.
+    const room = { x: randInt(1, MAP_W - w - 2), y: randInt(1, MAP_H - h - 2), w, h };
+
+    if (rooms.some(other => roomsOverlap(room, other))) continue;  // try again
+
+    carveRoom(room);
+
+    // Connect this room to the previous one with an L-shaped corridor.
+    if (rooms.length > 0) {
+      const a = roomCenter(rooms[rooms.length - 1]);
+      const b = roomCenter(room);
+      if (Math.random() < 0.5) {
+        carveHTunnel(a.x, b.x, a.y);
+        carveVTunnel(a.y, b.y, b.x);
+      } else {
+        carveVTunnel(a.y, b.y, a.x);
+        carveHTunnel(a.x, b.x, b.y);
+      }
+    }
+    rooms.push(room);
+  }
+}
+
+// Picks a monster type at random, using each type's weight for the current depth.
+function pickMonsterType() {
+  const weights = Object.entries(MONSTER_TYPES).map(([name, t]) => [name, t.weight(depth)]);
+  let roll = Math.random() * weights.reduce((sum, [, w]) => sum + w, 0);
+  for (const [name, w] of weights) {
+    roll -= w;
+    if (roll < 0) return name;
+  }
+  return weights[0][0];
+}
+
+// Put monsters in every room except the first (where the player starts).
+// Deeper floors allow more per room: 2 on floors 1-2, 3 on floors 3-4, 4 on floor 5.
+// On the last floor, the last room belongs to the boss alone.
+function spawnMonsters() {
+  monsters = [];
+  const maxPerRoom = 1 + Math.ceil(depth / 2);
+  const end = depth === MAX_DEPTH ? rooms.length - 1 : rooms.length;
+  for (const room of rooms.slice(1, end)) {
+    const count = randInt(0, maxPerRoom);
+    for (let i = 0; i < count; i++) {
+      const x = randInt(room.x, room.x + room.w - 1);
+      const y = randInt(room.y, room.y + room.h - 1);
+      if (monsterAt(x, y)) continue;
+
+      monsters.push(makeMonster(pickMonsterType(), x, y));
+    }
+  }
+  if (depth === MAX_DEPTH) spawnBoss();
+}
+
+// The boss waits in the last room carved, where the stairs would be on other
+// floors. It stands in the middle unless something is already there.
+function spawnBoss() {
+  const room = rooms[rooms.length - 1];
+  let { x, y } = roomCenter(room);
+  while (monsterAt(x, y) || (x === player.x && y === player.y)) {
+    x = randInt(room.x, room.x + room.w - 1);
+    y = randInt(room.y, room.y + room.h - 1);
+  }
+  const name = Object.keys(MONSTER_TYPES).find(n => MONSTER_TYPES[n].boss);
+  monsters.push(makeMonster(name, x, y));
+}
+
+// A new monster of the given type, standing at (x, y), asleep.
+// Monsters hit harder the deeper you go: +1 attack for each floor below floor 1.
+// That keeps up with the +1 DEF you get from each set of stairs.
+function makeMonster(name, x, y) {
+  const t = MONSTER_TYPES[name];
+  const atk = t.atk + (depth - 1);
+  return { name, x, y, hp: t.hp, atk, def: t.def, ch: t.ch, color: t.color, awake: false };
+}
+
+// 1 in 5 potions is poison. 40% are healing; the rest are strength, defense or whirlwind.
+function randomPotion() {
+  const roll = Math.random();
+  if (roll < 0.2) return 'poison';
+  if (roll < 0.35) return 'strength';
+  if (roll < 0.5) return 'defense';
+  if (roll < 0.6) return 'whirlwind';
+  return 'healing';
+}
+
+// Half the scrolls are lightning ('scroll'), half are mapping.
+function randomScroll() {
+  return Math.random() < 0.5 ? 'scroll' : 'mapping';
+}
+
+// About 60% of rooms (not the first) get one item: mostly potions, some scrolls.
+function spawnItems() {
+  items = [];
+  for (const room of rooms.slice(1)) {
+    if (Math.random() > 0.6) continue;
+    items.push({
+      type: Math.random() < 0.7 ? randomPotion() : randomScroll(),
+      x: randInt(room.x, room.x + room.w - 1),
+      y: randInt(room.y, room.y + room.h - 1),
+    });
+  }
+}
+
+// A fresh run: new player, back to floor 1.
+function newGame() {
+  player = { x: 0, y: 0, hp: 30, maxHp: 30, atk: 5, def: 2 };
+  setUpPotions();
+  inventory = ['healing'];  // start with one healing potion (but you don't know that yet)
+  messages = [];
+  gameOver = false;
+  won = false;
+  lastRun = lastRank = null;
+  stats = { turns: 0, kills: {}, killedBy: null, deepest: 1 };
+  depth = 1;
+  startFloor();
+}
+
+// Builds the floor for the current depth. The player keeps their HP, stats and pack.
+function startFloor() {
+  generateDungeon();
+  const start = roomCenter(rooms[0]);
+  player.x = start.x;
+  player.y = start.y;
+  // Stairs go in the last room carved, which is usually far from the start.
+  stairs = depth < MAX_DEPTH ? roomCenter(rooms[rooms.length - 1]) : null;
+  spawnMonsters();
+  spawnItems();
+  explored = map.map(row => row.map(() => false));
+  computeFOV();
+  addMessage(`Floor ${depth}. ${monsters.length} monsters lurk here.`);
+  if (depth === MAX_DEPTH) addMessage('This is the deepest floor. The dark wizard waits here. Slay it to win!', MSG.warn);
+}
+
+// Taking the stairs to a new floor gives a small boost, so the player keeps up
+// with tougher monsters. Floors you've already reached (say, after the old woman
+// sent you back) give no boost the second time.
+function descend() {
+  if (!stairs || player.x !== stairs.x || player.y !== stairs.y) {
+    addMessage('There are no stairs here.');
+    return;
+  }
+  depth++;
+  stats.turns++;
+  SOUNDS.stairs();
+  if (depth > stats.deepest) {
+    stats.deepest = depth;
+    player.maxHp += 5;
+    player.atk += 1;
+    player.def += 1;
+    player.hp = Math.min(player.maxHp, player.hp + 10);
+    addMessage('You rest on the stairs: +5 max HP, +1 ATK, +1 DEF, and you recover some HP.', MSG.good);
+  } else {
+    addMessage('You head back down. You have been this deep before.');
+  }
+  startFloor();
+}
+
+// ---------- Field of view ----------
+// Walks a straight line (Bresenham's algorithm) from (x0,y0) to (x1,y1).
+// Returns false if a wall is in the way. The end tile itself can be a wall,
+// so you can see the walls of a room, just not through them.
+function hasLineOfSight(x0, y0, x1, y1) {
+  const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  let x = x0, y = y0;
+  while (x !== x1 || y !== y1) {
+    if ((x !== x0 || y !== y0) && map[y][x] === WALL) return false;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x += sx; }
+    if (e2 <= dx) { err += dx; y += sy; }
+  }
+  return true;
+}
+
+// Every tile within FOV_RADIUS that has a clear line to the player is visible.
+function computeFOV() {
+  visible = map.map(row => row.map(() => false));
+  for (let y = player.y - FOV_RADIUS; y <= player.y + FOV_RADIUS; y++) {
+    for (let x = player.x - FOV_RADIUS; x <= player.x + FOV_RADIUS; x++) {
+      if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) continue;
+      const dx = x - player.x, dy = y - player.y;
+      if (dx * dx + dy * dy > FOV_RADIUS * FOV_RADIUS) continue;   // keep it round
+      if (hasLineOfSight(player.x, player.y, x, y)) {
+        visible[y][x] = true;
+        explored[y][x] = true;
+      }
+    }
+  }
+}
+
+// ---------- Combat ----------
+// Damage is attack +/- 1, minus the defender's defense. 0 damage is a miss.
+function attack(attacker, defender) {
+  const damage = Math.max(0, attacker.atk + randInt(-1, 1) - defender.def);
+  defender.hp -= damage;
+
+  if (attacker === player) {
+    if (damage === 0) {
+      addMessage(`You miss the ${defender.name}.`, MSG.miss);
+      SOUNDS.miss();
+    } else {
+      addMessage(`You hit the ${defender.name} for ${damage}.`, MSG.you);
+      SOUNDS.hit();
+    }
+  } else {
+    if (damage === 0) {
+      addMessage(`The ${attacker.name} misses you.`, MSG.miss);
+      SOUNDS.miss();
+    } else {
+      addMessage(`The ${attacker.name} hits you for ${damage}.`, MSG.bad);
+      flashHurt();
+      if (player.hp > 0) SOUNDS.hurt();
+    }
+  }
+
+  if (defender.hp > 0) return;
+  if (defender === player) {
+    endRun(attacker.name);
+    addMessage('You die...', MSG.bad);
+    SOUNDS.death();
+  } else {
+    killMonster(defender);
+  }
+}
+
+function killMonster(m) {
+  monsters = monsters.filter(other => other !== m);
+  stats.kills[m.name] = (stats.kills[m.name] || 0) + 1;
+  addMessage(`The ${m.name} dies!`, MSG.kill);
+  if (isBoss(m)) {
+    endRun(null);
+    addMessage('The dungeon falls silent.', MSG.kill);
+    SOUNDS.win();
+    return;
+  }
+  if (monsters.length === 0) addMessage('This floor is clear. Find the stairs down (>).', MSG.good);
+  SOUNDS.kill();
+}
+
+// Hurts the player for `damage`, ignoring defense. `source` names what did it,
+// for the end screen if it kills you.
+function hurtPlayer(damage, source) {
+  player.hp -= damage;
+  flashHurt();
+  if (player.hp > 0) {
+    SOUNDS.hurt();
+    return;
+  }
+  endRun(source);
+  addMessage('You die...', MSG.bad);
+  SOUNDS.death();
+}
+
+// ---------- Items ----------
+// Deals out a random look to each potion kind for this run. Nothing is known yet.
+function setUpPotions() {
+  potionLooks = {};
+  giveOutLooks();
+  identified = [];
+}
+
+// Gives each potion kind that has no look yet a random look nobody else is using.
+function giveOutLooks() {
+  const used = Object.values(potionLooks).map(look => look.adj);
+  const free = POTION_LOOKS.filter(look => !used.includes(look.adj));
+  for (const [type, t] of Object.entries(ITEM_TYPES))
+    if (t.potion && !potionLooks[type]) potionLooks[type] = free.splice(randInt(0, free.length - 1), 1)[0];
+}
+
+// What the player calls an item: "crimson potion" until it's been identified.
+function itemName(type) {
+  if (ITEM_TYPES[type].potion && !identified.includes(type))
+    return `${potionLooks[type].adj} potion`;
+  return ITEM_TYPES[type].name;
+}
+
+// How an item is drawn: {sprite, ch, color}.
+function itemLook(type) {
+  const t = ITEM_TYPES[type];
+  if (t.potion) return { ...potionLooks[type], ch: '!' };
+  return t;
+}
+
+function pickUpItem() {
+  const item = items.find(i => i.x === player.x && i.y === player.y);
+  if (!item) return;
+  const name = itemName(item.type);
+  if (inventory.length >= INVENTORY_SIZE) {
+    addMessage(`You see ${withArticle(name)}, but your pack is full.`);
+    return;
+  }
+  items = items.filter(i => i !== item);
+  inventory.push(item.type);
+  addMessage(`You pick up ${withArticle(name)}.`, MSG.item);
+  SOUNDS.pickup();
+}
+
+// Returns true if an item was used (which costs a turn).
+function useItem(slot) {
+  const type = inventory[slot];
+  if (!type) return false;
+  const t = ITEM_TYPES[type];
+
+  if (t.potion) {
+    // Only a *known* healing potion can be refused at full health. Refusing an
+    // unknown one would give away what it is.
+    if (type === 'healing' && identified.includes('healing') && player.hp >= player.maxHp) {
+      addMessage("You're already at full health.");
+      return false;
+    }
+    t.use();
+    identify(type);
+  } else if (!t.use()) {
+    return false;
+  }
+
+  inventory.splice(slot, 1);
+  return true;
+}
+
+// You've seen what a potion does, so from now on you know it by name.
+function identify(type) {
+  if (identified.includes(type)) return;
+  identified.push(type);
+  addMessage(`That was a ${ITEM_TYPES[type].name}! You'll recognize them from now on.`, MSG.item);
+}
+
+function drinkHealing() {
+  const healed = Math.min(POTION_HEAL, player.maxHp - player.hp);
+  player.hp += healed;
+  SOUNDS.drink();
+  if (healed > 0) addMessage(`Warmth spreads through you. You recover ${healed} HP.`, MSG.good);
+  else addMessage('You feel refreshed, but you were already at full health.');
+}
+
+function drinkStrength() {
+  player.atk += 1;
+  SOUNDS.drink();
+  addMessage('Power surges through your arms! +1 ATK.', MSG.good);
+}
+
+function drinkDefense() {
+  player.def += 1;
+  SOUNDS.drink();
+  addMessage('Your skin hardens like bark! +1 DEF.', MSG.good);
+}
+
+// A whirlwind spins out from you and blows away every monster next to you.
+function drinkWhirlwind() {
+  SOUNDS.warp();
+  const next = monsters.filter(m => Math.abs(m.x - player.x) + Math.abs(m.y - player.y) === 1);
+  for (const m of next) blowBack(m, m.x - player.x, m.y - player.y);
+  if (next.length > 0) addMessage('A whirlwind bursts out of you and flings your enemies away!', MSG.magic);
+  else addMessage('A whirlwind spins around you, but there is nothing nearby to blow away.');
+}
+
+function drinkPoison() {
+  const damage = randInt(6, 10);
+  addMessage(`Ugh! The potion burns your throat. You lose ${damage} HP.`, MSG.bad);
+  hurtPlayer(damage, 'potion of poison');
+}
+
+// ---------- Throwing ----------
+// Press T, then the pack number of a potion, then a direction. `throwing` is
+// null when you're not throwing, otherwise {slot} (slot is null until you pick one).
+let throwing = null;   // not saved: a reloaded game is never halfway through a throw
+
+function startThrow() {
+  if (!inventory.some(type => ITEM_TYPES[type].potion)) {
+    addMessage('You have no potions to throw.');
+    return;
+  }
+  throwing = { slot: null };
+  addMessage('Throw which potion? Press its number (Esc to cancel).');
+}
+
+// Handles a key while you're throwing. Returns false for keys that mean nothing right now.
+function throwKey(key) {
+  if (key === 'Escape') {
+    throwing = null;
+    addMessage('You put the potion away.');
+    return true;
+  }
+  // Step 1: which potion.
+  if (throwing.slot === null) {
+    if (!/^[1-9]$/.test(key)) return false;
+    const type = inventory[Number(key) - 1];
+    if (!type) return false;
+    if (!ITEM_TYPES[type].potion) {
+      addMessage('You can only throw potions. Pick another, or Esc to cancel.');
+      return true;
+    }
+    throwing.slot = Number(key) - 1;
+    addMessage(`Throw the ${itemName(type)} which way? (arrow keys or WASD)`);
+    return true;
+  }
+  // Step 2: which way.
+  const dir = KEYS[key];
+  if (!dir || (dir[0] === 0 && dir[1] === 0)) return false;
+  const slot = throwing.slot;
+  throwing = null;
+  throwPotion(slot, dir[0], dir[1]);
+  endPlayerTurn();
+  return true;
+}
+
+// The potion flies in a straight line until it hits a monster, hits a wall,
+// or runs out of range. Either way, it's gone from your pack.
+function throwPotion(slot, dx, dy) {
+  const type = inventory[slot];
+  const name = itemName(type);
+  inventory.splice(slot, 1);
+  let x = player.x, y = player.y;
+  for (let i = 0; i < THROW_RANGE && map[y + dy][x + dx] === FLOOR; i++) {
+    x += dx;
+    y += dy;
+    const m = monsterAt(x, y);
+    if (m) {
+      addMessage(`The ${name} smashes on the ${m.name}!`, MSG.item);
+      m.awake = true;
+      ITEM_TYPES[type].splash(m, dx, dy);
+      identify(type);   // you saw what it did
+      return;
+    }
+  }
+  addMessage(`The ${name} smashes on the floor. What a waste.`);
+  SOUNDS.miss();
+}
+
+// Poison hurts as much as drinking it does. Armor doesn't help against fumes.
+function splashPoison(m) {
+  const damage = randInt(6, 10);
+  m.hp -= damage;
+  addMessage(`The ${m.name} chokes on the fumes and takes ${damage} damage.`, MSG.you);
+  SOUNDS.hit();
+  if (m.hp <= 0) killMonster(m);
+}
+
+function splashHealing(m) {
+  m.hp = MONSTER_TYPES[m.name].hp;
+  addMessage(`Oops. The ${m.name}'s wounds close up.`, MSG.warn);
+  SOUNDS.drink();
+}
+
+function splashStrength(m) {
+  m.atk += 1;
+  addMessage(`Oops. The ${m.name} looks stronger!`, MSG.warn);
+  SOUNDS.drink();
+}
+
+function splashDefense(m) {
+  m.def += 1;
+  addMessage(`Oops. The ${m.name}'s skin hardens!`, MSG.warn);
+  SOUNDS.drink();
+}
+
+// The monster flies on in the direction the potion was going.
+function splashWhirlwind(m, dx, dy) {
+  blowBack(m, dx, dy);
+  addMessage(`A gust of wind hurls the ${m.name} back!`, MSG.magic);
+  SOUNDS.warp();
+}
+
+// Pushes monster m up to WHIRLWIND_PUSH tiles in direction (dx, dy). It stops
+// early if a wall, another monster or you are in the way.
+function blowBack(m, dx, dy) {
+  for (let i = 0; i < WHIRLWIND_PUSH; i++) {
+    const nx = m.x + dx, ny = m.y + dy;
+    if (map[ny][nx] !== FLOOR || monsterAt(nx, ny) || (nx === player.x && ny === player.y)) break;
+    m.x = nx;
+    m.y = ny;
+  }
+}
+
+// Shows you the whole floor: every tile counts as explored, so it's all on the map.
+function readMapping() {
+  explored = map.map(row => row.map(() => true));
+  addMessage('The layout of this floor fills your mind. Press M to see the map.', MSG.magic);
+  SOUNDS.pickup();
+  return true;
+}
+
+// Strikes the nearest monster you can see. Lightning ignores defense.
+function readLightning() {
+  let target = null, bestDist = Infinity;
+  for (const m of monsters) {
+    if (!visible[m.y][m.x]) continue;
+    const d = Math.hypot(m.x - player.x, m.y - player.y);
+    if (d < bestDist) { target = m; bestDist = d; }
+  }
+  if (!target) {
+    addMessage('No enemy in sight. You keep the scroll.');
+    return false;
+  }
+  target.hp -= LIGHTNING_DAMAGE;
+  addMessage(`Lightning strikes the ${target.name} for ${LIGHTNING_DAMAGE}!`, MSG.magic);
+  SOUNDS.zap();
+  if (target.hp <= 0) killMonster(target);
+  return true;
+}
+
+// ---------- Monster AI ----------
+// Breadth-first search outward from the player. dist[y][x] = number of steps
+// from that tile to the player. Monsters chase by stepping to a smaller number.
+function distanceMapFromPlayer() {
+  const dist = map.map(row => row.map(() => Infinity));
+  dist[player.y][player.x] = 0;
+  const queue = [[player.x, player.y]];
+  while (queue.length > 0) {
+    const [x, y] = queue.shift();
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy;
+      if (map[ny][nx] === FLOOR && dist[ny][nx] === Infinity) {
+        dist[ny][nx] = dist[y][x] + 1;
+        queue.push([nx, ny]);
+      }
+    }
+  }
+  return dist;
+}
+
+function monstersTurn() {
+  const dist = distanceMapFromPlayer();
+  const floor = map;
+  // Loop over a copy, so monsters summoned this turn wait until next turn to act.
+  for (const m of [...monsters]) {
+    if (map !== floor) return;   // a spell sent you to another floor: the old monsters are gone
+    // Sleeping monsters wake up once they're in view, and then hunt you for good.
+    if (!m.awake) {
+      if (!visible[m.y][m.x]) continue;
+      m.awake = true;
+      if (isBoss(m)) {
+        addMessage(`The ${m.name} turns to face you. "So, another fool comes to die."`, MSG.warn);
+      } else {
+        const spotter = withArticle(m.name);
+        addMessage(`${spotter[0].toUpperCase()}${spotter.slice(1)} spots you!`, MSG.warn);
+      }
+    }
+
+    const moves = MONSTER_TYPES[m.name].moves;
+    if (moves === 'slow') {
+      m.resting = !m.resting;          // flips every turn, so it acts every other turn
+      if (m.resting) continue;
+    }
+    if (moves === 'erratic' && Math.random() < 0.5) {
+      flutter(m);
+    } else if (moves === 'spells' && visible[m.y][m.x] && castSpell(m)) {
+      // Casting a spell takes her whole turn.
+    } else if (moves === 'boss') {
+      bossTurn(m, dist);
+    } else {
+      const actions = moves === 'fast' ? 2 : 1;
+      for (let i = 0; i < actions && !gameOver; i++) monsterStep(m, dist);
+    }
+    if (gameOver) return;
+  }
+}
+
+// One action for a monster: attack if it's next to the player, otherwise move closer.
+function monsterStep(m, dist) {
+  if (Math.abs(m.x - player.x) + Math.abs(m.y - player.y) === 1) {
+    attack(m, player);
+    return;
+  }
+
+  if (MONSTER_TYPES[m.name].moves === 'phase') {
+    // Ghosts ignore the map: step along whichever axis is farther from the player.
+    const dx = Math.sign(player.x - m.x), dy = Math.sign(player.y - m.y);
+    const steps = Math.abs(player.x - m.x) >= Math.abs(player.y - m.y)
+      ? [[dx, 0], [0, dy]] : [[0, dy], [dx, 0]];
+    for (const [sx, sy] of steps) {
+      if (sx === 0 && sy === 0) continue;
+      if (!monsterAt(m.x + sx, m.y + sy)) { m.x += sx; m.y += sy; return; }
+    }
+    return;
+  }
+
+  // Step to whichever free neighbor is closest to the player.
+  const d = dist[m.y][m.x];
+  let best = null;
+  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const nx = m.x + dx, ny = m.y + dy;
+    if (dist[ny][nx] < d && !monsterAt(nx, ny) && (!best || dist[ny][nx] < dist[best.y][best.x]))
+      best = { x: nx, y: ny };
+  }
+  if (best) { m.x = best.x; m.y = best.y; }
+}
+
+// Bats flap in a random direction. If that happens to be into you, they bite.
+function flutter(m) {
+  const [dx, dy] = [[1, 0], [-1, 0], [0, 1], [0, -1]][randInt(0, 3)];
+  const nx = m.x + dx, ny = m.y + dy;
+  if (nx === player.x && ny === player.y) attack(m, player);
+  else if (map[ny][nx] === FLOOR && !monsterAt(nx, ny)) { m.x = nx; m.y = ny; }
+}
+
+// The old woman rolls a 20-sided die and maybe casts a spell:
+//   1-2 send you back to floor 1     3-4 heal you completely
+//   5-6 confuse you                  7-8 make you forget this floor's map
+//   9-10 summon rats or bats         11-20 nothing
+// Returns true if she cast a spell.
+const CONFUSED_MOVES = 3;
+function castSpell(m) {
+  const roll = randInt(1, 20);
+  if (roll <= 2) {
+    addMessage(`The ${m.name} mutters a spell. You're pulled all the way back up to floor 1!`, MSG.magic);
+    SOUNDS.warp();
+    depth = 1;
+    startFloor();   // a brand-new floor 1; you keep your pack and stats
+    return true;
+  }
+  if (roll <= 4) {
+    player.hp = player.maxHp;
+    addMessage(`The ${m.name} waves her hand. Your wounds close up completely!`, MSG.good);
+    SOUNDS.drink();
+    return true;
+  }
+  if (roll <= 6) {
+    player.confused = CONFUSED_MOVES;
+    addMessage(`The ${m.name} cackles. The room spins, and you feel dizzy and confused!`, MSG.bad);
+    SOUNDS.warp();
+    return true;
+  }
+  if (roll <= 8) {
+    explored = map.map(row => row.map(() => false));
+    computeFOV();   // you still remember what's in front of you
+    addMessage(`The ${m.name} whispers. Your memory of this floor fades away...`, MSG.bad);
+    SOUNDS.warp();
+    return true;
+  }
+  if (roll <= 10) return summon(m, ['rat', 'bat']);
+  return false;
+}
+
+// The dark wizard. Next to you, it fights like any other monster. From further
+// away it casts a spell every few actions: usually a fire bolt, sometimes a
+// call for ghosts. Below half health it flies into a rage and acts twice a turn.
+function bossTurn(m, dist) {
+  if (!m.enraged && m.hp <= MONSTER_TYPES[m.name].hp / 2) {
+    m.enraged = true;
+    addMessage(`The ${m.name} shrieks with rage! Dark power crackles through the air.`, MSG.warn);
+    SOUNDS.warp();
+  }
+  const actions = m.enraged ? 2 : 1;
+  for (let i = 0; i < actions && !gameOver; i++) {
+    m.cooldown = Math.max(0, (m.cooldown ?? 0) - 1);
+    const nextToYou = Math.abs(m.x - player.x) + Math.abs(m.y - player.y) === 1;
+    if (!nextToYou && m.cooldown === 0 && visible[m.y][m.x]) {
+      m.cooldown = BOSS_SPELL_COOLDOWN;
+      if (Math.random() < 0.3 && summon(m, ['ghost'])) continue;
+      fireBolt(m);
+    } else {
+      monsterStep(m, dist);
+    }
+  }
+}
+
+function fireBolt(m) {
+  const damage = randInt(FIREBOLT_MIN, FIREBOLT_MAX);
+  addMessage(`The ${m.name} hurls a bolt of fire at you! You take ${damage} damage.`, MSG.bad);
+  SOUNDS.fire();
+  hurtPlayer(damage, m.name);
+}
+
+// Calls up to 2 helpers, picked from `kinds`, onto the free floor tiles next to m.
+// Returns false (no spell) if there's no room.
+function summon(m, kinds) {
+  let count = 0;
+  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const x = m.x + dx, y = m.y + dy;
+    if (count === 2 || map[y][x] !== FLOOR || monsterAt(x, y)) continue;
+    if (x === player.x && y === player.y) continue;
+    const helper = makeMonster(kinds[randInt(0, kinds.length - 1)], x, y);
+    helper.awake = true;   // they arrive already hunting you
+    monsters.push(helper);
+    count++;
+  }
+  if (count === 0) return false;
+  addMessage(`The ${m.name} calls out, and ${count === 1 ? 'a creature appears' : 'creatures appear'} at its side!`, MSG.warn);
+  SOUNDS.warp();
+  return true;
+}
+
+// While confused, you lurch in a random direction. Bumping a wall still uses up the turn.
+function stumble() {
+  player.confused--;
+  const [dx, dy] = [[1, 0], [-1, 0], [0, 1], [0, -1]][randInt(0, 3)];
+  if (!playerAct(dx, dy)) addMessage('You stumble into a wall.');
+  if (player.confused === 0) addMessage('Your head clears.', MSG.good);
+  return true;
+}
+
+// ---------- Player turn ----------
+// Returns true if the player used up their turn.
+function playerAct(dx, dy) {
+  const nx = player.x + dx;
+  const ny = player.y + dy;
+  const target = monsterAt(nx, ny);
+  if (target) {
+    attack(player, target);     // bump into a monster to attack it
+    return true;
+  }
+  if (map[ny][nx] === FLOOR) {
+    player.x = nx;
+    player.y = ny;
+    pickUpItem();               // walking onto an item picks it up
+    if (stairs && player.x === stairs.x && player.y === stairs.y)
+      addMessage('There are stairs down here. Press > or Enter to descend.', MSG.good);
+    return true;
+  }
+  return false;                 // walked into a wall: no turn spent
+}
+
+const KEYS = {
+  ArrowUp: [0, -1], w: [0, -1],
+  ArrowDown: [0, 1], s: [0, 1],
+  ArrowLeft: [-1, 0], a: [-1, 0],
+  ArrowRight: [1, 0], d: [1, 0],
+  ' ': [0, 0],                  // wait a turn
+};
+
+// Everything that happens after the player spends a turn.
+function endPlayerTurn() {
+  stats.turns++;
+  computeFOV();
+  if (!gameOver) monstersTurn();   // a lightning kill can end the game mid-turn
+}
+
+document.addEventListener('keydown', e => {
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  // While the map is open, the only thing you can do is close it.
+  if (showMap && key !== 'm' && key !== 'Escape') return;
+  if (throwing) {
+    // Halfway through a throw, keys pick the potion and the direction.
+    if (KEYS[key]) e.preventDefault();
+    if (!throwKey(key)) return;
+  } else if (key === 'r') {
+    newGame();
+  } else if (key === 'm' || (key === 'Escape' && showMap)) {
+    showMap = !showMap;
+  } else if (key === 'v') {
+    toggleMute();
+  } else if (key === 'g') {
+    toggleGraphics();
+  } else if (KEYS[key]) {
+    e.preventDefault();          // stop arrow keys/space from scrolling the page
+    if (gameOver) return;
+    const [dx, dy] = KEYS[key];
+    let tookTurn;
+    if (dx === 0 && dy === 0) tookTurn = true;            // waiting
+    else if (player.confused > 0) tookTurn = stumble();   // the old woman's spell
+    else tookTurn = playerAct(dx, dy);
+    if (tookTurn) endPlayerTurn();
+  } else if (key === 't') {
+    if (gameOver) return;
+    startThrow();
+  } else if (key === '>' || key === 'Enter') {
+    if (gameOver) return;
+    descend();
+  } else if (/^[1-9]$/.test(key)) {
+    if (gameOver) return;
+    if (useItem(Number(key) - 1)) endPlayerTurn();
+  } else {
+    return;
+  }
+  saveGame();
+  draw();
+});
+
+// ---------- Rendering ----------
+// Only draw walls that touch a floor tile, so the rock around rooms stays blank.
+function isVisibleWall(x, y) {
+  for (let dy = -1; dy <= 1; dy++)
+    for (let dx = -1; dx <= 1; dx++) {
+      const row = map[y + dy];
+      if (row && row[x + dx] === FLOOR) return true;
+    }
+  return false;
+}
+
+// The camera: which map tile sits in the top-left corner of the screen.
+// It centers on the player but stops at the edges of the map.
+let cam = { x: 0, y: 0 };
+function updateCamera() {
+  const clamp = (v, max) => Math.max(0, Math.min(v, max));
+  cam.x = clamp(player.x - Math.floor(VIEW_W / 2), MAP_W - VIEW_W);
+  cam.y = clamp(player.y - Math.floor(VIEW_H / 2), MAP_H - VIEW_H);
+}
+
+// Cuts sprite number `sprite` out of the sheet and draws it as a `size`-pixel
+// square with its top-left corner at screen position (sx, sy).
+function drawSprite(sprite, sx, sy, size) {
+  const col = sprite % SHEET_COLS;
+  const row = Math.floor(sprite / SHEET_COLS);
+  ctx.drawImage(sheet, col * SPRITE, row * SPRITE, SPRITE, SPRITE, sx, sy, size, size);
+}
+
+// Draws one thing at map position (x, y): a sprite in graphics mode, or a
+// colored character in text mode. `dim` darkens it (for remembered tiles).
+function drawTile(sprite, ch, color, x, y, dim = false) {
+  const sx = (x - cam.x) * TILE;
+  const sy = (y - cam.y) * TILE;
+  if (useGraphics) {
+    drawSprite(sprite, sx, sy, TILE);
+    if (dim) {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+      ctx.fillRect(sx, sy, TILE, TILE);
+    }
+  } else {
+    ctx.fillStyle = color;
+    ctx.fillText(ch, sx + TILE / 2, sy + TILE / 2);
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingEnabled = false;   // scale pixel art up without blurring it
+  ctx.font = `${Math.round(TILE * 0.8)}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  if (showMap) drawFullMap();
+  else drawView();
+
+  // Status line and message log. The status turns red when HP is low.
+  // Once the boss has woken up, its health bar takes the place of the monster count.
+  const hp = Math.max(0, player.hp);
+  const boss = monsters.find(isBoss);
+  const goal = boss?.awake
+    ? `Dark wizard ${Math.max(0, boss.hp)}/${MONSTER_TYPES[boss.name].hp} ${healthBar(boss.hp, MONSTER_TYPES[boss.name].hp, 10)}`
+    : `Monsters left: ${monsters.length}`;
+  const status = document.getElementById('status');
+  status.textContent =
+    `Floor ${depth}/${MAX_DEPTH}   ` +
+    `HP ${hp}/${player.maxHp} ${healthBar(hp, player.maxHp, 20)}   ` +
+    `ATK ${player.atk}  DEF ${player.def}   ${goal}`;
+  status.style.color = hp <= player.maxHp * 0.3 ? '#f66' : '#ccc';
+
+  document.getElementById('inventory').textContent = 'Pack: ' + (inventory.length === 0
+    ? '(empty)'
+    : inventory.map((type, i) => `[${i + 1}] ${itemName(type)}`).join('   '));
+
+  const log = document.getElementById('log');
+  log.replaceChildren(...messages.map(m => {
+    const div = document.createElement('div');
+    div.textContent = m.text;
+    div.style.color = m.color;
+    return div;
+  }));
+
+  if (gameOver) drawEndScreen();
+}
+
+// A text health bar `width` characters wide, e.g. "[#######---]".
+function healthBar(hp, maxHp, width) {
+  const filled = Math.round((Math.max(0, Math.min(hp, maxHp)) / maxHp) * width);
+  return `[${'#'.repeat(filled)}${'-'.repeat(width - filled)}]`;
+}
+
+// The normal view: the part of the floor around the player, as the camera sees it.
+function drawView() {
+  updateCamera();
+
+  // Tiles in view are bright, remembered tiles are dim, unexplored tiles are blank.
+  // Only the part of the map inside the camera's view gets drawn.
+  for (let y = cam.y; y < cam.y + VIEW_H; y++) {
+    for (let x = cam.x; x < cam.x + VIEW_W; x++) {
+      if (!explored[y][x]) continue;
+      const lit = visible[y][x];
+      if (map[y][x] === FLOOR) {
+        // Sprinkle in a speckled floor tile now and then so the floor isn't flat.
+        const floorSprite = (x * 7 + y * 13) % 9 === 0 ? SPRITES.floorAlt : SPRITES.floor;
+        if (stairs && x === stairs.x && y === stairs.y) {
+          if (useGraphics) drawTile(floorSprite, '', '', x, y);   // floor under the hole
+          drawTile(SPRITES.stairs, '>', lit ? '#fff' : '#666', x, y, !lit);
+        } else {
+          drawTile(floorSprite, '.', lit ? '#777' : '#2a2a2a', x, y, !lit);
+        }
+      } else if (isVisibleWall(x, y)) {
+        drawTile(SPRITES.wall, '#', lit ? '#b09a6a' : '#3d3628', x, y, !lit);
+      }
+    }
+  }
+
+  // You only see items and monsters that are in view right now.
+  for (const it of items) {
+    const look = itemLook(it.type);
+    if (visible[it.y][it.x]) drawTile(look.sprite, look.ch, look.color, it.x, it.y);
+  }
+  for (const m of monsters) {
+    if (visible[m.y][m.x]) drawTile(MONSTER_TYPES[m.name].sprite, m.ch, m.color, m.x, m.y);
+  }
+
+  const dead = gameOver && !won;
+  drawTile(dead ? SPRITES.dead : SPRITES.player, dead ? '%' : '@', dead ? '#a33' : '#ffe066', player.x, player.y);
+}
+
+// ---------- Full map ----------
+// Press M to see the whole floor at once, shrunk down to fit the screen.
+// It only shows what you've explored. Each tile is a small colored square.
+let showMap = false;   // not saved: a reloaded game starts with the map closed
+const MAP_SCALE = Math.floor(Math.min(canvas.width / MAP_W, canvas.height / MAP_H));   // pixels per tile
+
+function drawFullMap() {
+  // Center the map on the canvas, in case it doesn't fill it exactly.
+  const ox = Math.floor((canvas.width - MAP_W * MAP_SCALE) / 2);
+  const oy = Math.floor((canvas.height - MAP_H * MAP_SCALE) / 2);
+  const square = (x, y, color) => {
+    ctx.fillStyle = color;
+    ctx.fillRect(ox + x * MAP_SCALE, oy + y * MAP_SCALE, MAP_SCALE, MAP_SCALE);
+  };
+
+  // Tiles in view are bright, remembered tiles are dim, unexplored tiles are blank.
+  for (let y = 0; y < MAP_H; y++) {
+    for (let x = 0; x < MAP_W; x++) {
+      if (!explored[y][x]) continue;
+      const lit = visible[y][x];
+      if (stairs && x === stairs.x && y === stairs.y) square(x, y, '#fff');
+      else if (map[y][x] === FLOOR) square(x, y, lit ? '#777' : '#3a3a3a');
+      else if (isVisibleWall(x, y)) square(x, y, lit ? '#b09a6a' : '#5e5238');
+    }
+  }
+
+  // Potions and scrolls you've spotted but not picked up yet. Unknown potions
+  // show their look ("crimson"), just like in the normal view.
+  ctx.font = `bold ${MAP_SCALE}px monospace`;
+  for (const it of items) {
+    if (!explored[it.y][it.x]) continue;
+    const look = itemLook(it.type);
+    const sx = ox + it.x * MAP_SCALE, sy = oy + it.y * MAP_SCALE;
+    if (useGraphics) {
+      drawSprite(look.sprite, sx, sy, MAP_SCALE);
+    } else {
+      ctx.fillStyle = look.color;
+      ctx.fillText(look.ch, sx + MAP_SCALE / 2, sy + MAP_SCALE / 2);
+    }
+  }
+
+  square(player.x, player.y, '#ffe066');   // you are here
+
+  // A title bar across the top.
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+  ctx.fillRect(0, 0, canvas.width, 26);
+  ctx.font = '16px monospace';
+  ctx.fillStyle = '#ccc';
+  ctx.fillText(`Map of floor ${depth}  ·  M or Esc to close`, canvas.width / 2, 13);
+}
+
+// Darkens the map and shows how the run went, plus the best runs so far.
+function drawEndScreen() {
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const cx = canvas.width / 2;
+  let y = 70;
+
+  ctx.font = 'bold 48px monospace';
+  ctx.fillStyle = won ? '#ffe066' : '#d33';
+  ctx.fillText(won ? 'VICTORY' : 'YOU DIED', cx, y);
+
+  const killList = Object.entries(stats.kills)
+    .map(([name, n]) => `${n} ${name}${n === 1 ? '' : 's'}`)
+    .join(', ') || 'none';
+
+  const lines = [
+    won ? `You slew the dark wizard on floor ${MAX_DEPTH} and conquered the dungeon.`
+        : `Slain by ${withArticle(stats.killedBy)} on floor ${depth} of ${MAX_DEPTH}.`,
+    `Turns survived: ${stats.turns}`,
+    `Kills: ${killList}`,
+  ];
+
+  ctx.font = '16px monospace';
+  ctx.fillStyle = '#ccc';
+  y += 50;
+  for (const line of lines) {
+    ctx.fillText(line, cx, y);
+    y += 24;
+  }
+
+  if (lastRun) {
+    ctx.fillStyle = '#ffe066';
+    ctx.fillText(`Your score: ${lastRun.score}`, cx, y + 8);
+    y += 56;
+  }
+
+  // The high-score table. This run is highlighted if it made it in.
+  ctx.fillStyle = '#999';
+  ctx.fillText('Best runs', cx, y);
+  y += 28;
+  highScores.forEach((s, i) => {
+    ctx.fillStyle = i === lastRank ? '#ffe066' : '#ccc';
+    ctx.fillText(scoreRow(s, i), cx, y);
+    y += 22;
+  });
+
+  ctx.fillStyle = '#ffe066';
+  ctx.fillText('Press R to play again', cx, y + 24);
+}
+
+// ---------- Start ----------
+// Pick up where you left off if there's a saved game, otherwise start fresh.
+if (!loadGame()) newGame();
+draw();
+</script>
+</body>
+</html>
