@@ -139,6 +139,14 @@ test("each of the old woman's spells has its own sound", () => {
   assert.deepEqual(sounds, ['heal', 'confuse', 'forget']);
 });
 
+test('putting on gear clanks', () => {
+  const game = startGame();
+  game.peek("inventory = ['dagger']");
+  const heard = listen(game);
+  game.press('1');
+  assert.ok(heard().includes('equip'), heard().join());
+});
+
 test('drinking a potion gulps, then plays what it did', () => {
   const game = startGame();
   game.peek("inventory = ['strength', 'healing']; player.hp = 10");

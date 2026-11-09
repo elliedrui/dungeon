@@ -24,6 +24,7 @@
   p { margin: 8px 0; }
   #status { margin-top: 8px; font-size: 15px; white-space: pre; }   /* pre keeps the spacing */
   /* pre-wrap keeps the spacing like pre, but lets long packs wrap at the canvas width */
+  #gear { margin-top: 4px; color: #aaa; white-space: pre-wrap; max-width: 960px; text-align: center; }
   #inventory { margin-top: 4px; color: #aaa; white-space: pre-wrap; max-width: 960px; text-align: center; }
   #log {
     width: 960px;
@@ -44,6 +45,7 @@
 <body>
 <canvas id="game"></canvas>
 <div id="status"></div>
+<div id="gear"></div>
 <div id="inventory"></div>
 <div id="log"></div>
 <p>Move / attack: arrow keys or WASD &nbsp;·&nbsp; Use item: 1-9 &nbsp;·&nbsp; Throw potion: T &nbsp;·&nbsp; Descend: &gt; or Enter &nbsp;·&nbsp; Wait: space &nbsp;·&nbsp; Map: M &nbsp;·&nbsp; Sound: V &nbsp;·&nbsp; Graphics/text: G &nbsp;·&nbsp; R: new game</p>
@@ -124,7 +126,30 @@ const ITEM_TYPES = {
   poison:    { name: 'potion of poison',    potion: true, use: drinkPoison,    splash: splashPoison },
   scroll:    { name: 'scroll of lightning', ch: '?', color: '#6cf', sprite: 6, use: readLightning },
   mapping:   { name: 'scroll of mapping',   ch: '?', color: '#fd6', sprite: 6, use: readMapping },
+
+  // Gear: weapons, armor, shields and helmets. Using one puts it on (see wearGear).
+  // `slot` is where it's worn, `atk`/`def` is what it adds while you wear it, and
+  // `depth` is the first floor it can be found on: better gear lies deeper.
+  // Text-mode colors go by material: leather/wood, iron, steel, then gold trim.
+  dagger:          { name: 'dagger',        slot: 'weapon', atk: 1, depth: 1, ch: ')', color: '#b85', sprite: 24, use: wearGear },
+  'short sword':   { name: 'short sword',   slot: 'weapon', atk: 2, depth: 2, ch: ')', color: '#aaa', sprite: 25, use: wearGear },
+  longsword:       { name: 'longsword',     slot: 'weapon', atk: 3, depth: 3, ch: ')', color: '#cde', sprite: 26, use: wearGear },
+  'battle axe':    { name: 'battle axe',    slot: 'weapon', atk: 4, depth: 4, ch: ')', color: '#fd4', sprite: 27, use: wearGear },
+  'padded tunic':  { name: 'padded tunic',  slot: 'armor',  def: 1, depth: 1, ch: '[', color: '#b85', sprite: 28, use: wearGear },
+  'leather armor': { name: 'leather armor', slot: 'armor',  def: 2, depth: 2, ch: '[', color: '#a63', sprite: 29, use: wearGear },
+  'chain mail':    { name: 'chain mail',    slot: 'armor',  def: 3, depth: 3, ch: '[', color: '#aaa', sprite: 30, use: wearGear },
+  'plate armor':   { name: 'plate armor',   slot: 'armor',  def: 4, depth: 4, ch: '[', color: '#fd4', sprite: 31, use: wearGear },
+  buckler:         { name: 'buckler',       slot: 'shield', def: 1, depth: 1, ch: ']', color: '#b85', sprite: 32, use: wearGear },
+  'round shield':  { name: 'round shield',  slot: 'shield', def: 1, depth: 2, ch: ']', color: '#e44', sprite: 33, use: wearGear },
+  'kite shield':   { name: 'kite shield',   slot: 'shield', def: 2, depth: 3, ch: ']', color: '#58e', sprite: 34, use: wearGear },
+  'tower shield':  { name: 'tower shield',  slot: 'shield', def: 2, depth: 4, ch: ']', color: '#fd4', sprite: 35, use: wearGear },
+  'leather cap':   { name: 'leather cap',   slot: 'helmet', def: 1, depth: 1, ch: '^', color: '#b85', sprite: 36, use: wearGear },
+  'iron helm':     { name: 'iron helm',     slot: 'helmet', def: 1, depth: 2, ch: '^', color: '#aaa', sprite: 37, use: wearGear },
+  'horned helm':   { name: 'horned helm',   slot: 'helmet', def: 1, depth: 3, ch: '^', color: '#cde', sprite: 38, use: wearGear },
+  'great helm':    { name: 'great helm',    slot: 'helmet', def: 2, depth: 4, ch: '^', color: '#fd4', sprite: 39, use: wearGear },
 };
+const GEAR_SLOTS = ['weapon', 'armor', 'shield', 'helmet'];
+const GEAR_PER_FLOOR = 1;   // pieces of gear lying around on each floor
 const INVENTORY_SIZE = 9;   // one slot per number key
 const POTION_HEAL = 12;
 const LIGHTNING_DAMAGE = 12;
@@ -379,6 +404,13 @@ const SOUNDS = {
     tone({ freq: 220, to: 880, duration: 0.35, volume: 0.05, delay: 0.25, filter: { type: 'lowpass', freq: 1500 } });
     tone({ freq: 880, type: 'triangle', duration: 0.25, volume: 0.06, delay: 0.58 });
   },
+  equip: () => {   // putting on gear: a metal clank
+    // Two notes that don't fit together (not a chord) ring like struck metal.
+    const p = vary(0.03);
+    noise({ duration: 0.06, volume: 0.2, filter: { type: 'bandpass', freq: 3000, q: 1.5 } });
+    for (const freq of [587, 1415])
+      tone({ freq: freq * p, type: 'square', duration: 0.18, volume: 0.03, filter: { type: 'lowpass', freq: 3000 } });
+  },
   throw: () => noise({   // a potion flying
     duration: 0.18, volume: 0.1, attack: 0.04, filter: { type: 'bandpass', freq: 800, to: 2400, q: 2 },
   }),
@@ -524,6 +556,8 @@ function loadGame() {
     // POTION_LOOKS, so a save from before the new sprite sheet draws the right picture.
     for (const type in potionLooks)
       potionLooks[type] = POTION_LOOKS.find(look => look.adj === potionLooks[type].adj);
+    // A save from before gear: nothing worn yet.
+    player.gear ??= noGear();
     // A save from before stats.deepest: the floor you're on is the deepest you know of.
     stats.deepest ??= depth;
     // A save from before the boss: the last floor gets one now.
@@ -702,7 +736,25 @@ function randomScroll() {
   return Math.random() < 0.5 ? 'scroll' : 'mapping';
 }
 
+// A random piece of gear for this floor: any slot, from the newest two tiers
+// that can be found this deep. (On floor 1 that's only the first tier.)
+function randomGear() {
+  const choices = Object.keys(ITEM_TYPES).filter(type => {
+    const t = ITEM_TYPES[type];
+    return t.slot && t.depth <= depth && t.depth >= depth - 1;
+  });
+  return choices[randInt(0, choices.length - 1)];
+}
+
+// A random spot on the floor of a random room (not the first, unless it's the only one).
+function randomSpotInARoom() {
+  const others = rooms.length > 1 ? rooms.slice(1) : rooms;
+  const room = others[randInt(0, others.length - 1)];
+  return { x: randInt(room.x, room.x + room.w - 1), y: randInt(room.y, room.y + room.h - 1) };
+}
+
 // About 60% of rooms (not the first) get one item: mostly potions, some scrolls.
+// Then GEAR_PER_FLOOR pieces of gear are dropped in random rooms.
 function spawnItems() {
   items = [];
   for (const room of rooms.slice(1)) {
@@ -713,11 +765,12 @@ function spawnItems() {
       y: randInt(room.y, room.y + room.h - 1),
     });
   }
+  for (let i = 0; i < GEAR_PER_FLOOR; i++) items.push({ type: randomGear(), ...randomSpotInARoom() });
 }
 
 // A fresh run: new player, back to floor 1.
 function newGame() {
-  player = { x: 0, y: 0, hp: 30, maxHp: 30, atk: 5, def: 2 };
+  player = { x: 0, y: 0, hp: 30, maxHp: 30, atk: 5, def: 2, gear: noGear() };
   setUpPotions();
   inventory = ['healing'];  // start with one healing potion (but you don't know that yet)
   messages = [];
@@ -905,6 +958,13 @@ function pickUpItem() {
   const item = items.find(i => i.x === player.x && i.y === player.y);
   if (!item) return;
   const name = itemName(item.type);
+  // Gear that's no better than what you're wearing stays on the floor, so it
+  // doesn't fill your pack.
+  const worn = ITEM_TYPES[item.type].slot && player.gear[ITEM_TYPES[item.type].slot];
+  if (worn && gearValue(item.type) <= gearValue(worn)) {
+    addMessage(`You see ${withArticle(name)} (${gearBonus(item.type)}), no better than your ${worn} (${gearBonus(worn)}).`);
+    return;
+  }
   if (inventory.length >= INVENTORY_SIZE) {
     addMessage(`You see ${withArticle(name)}, but your pack is full.`);
     SOUNDS.deny();
@@ -932,7 +992,7 @@ function useItem(slot) {
     }
     t.use();
     identify(type);
-  } else if (!t.use()) {
+  } else if (!t.use(type)) {
     return false;
   }
 
@@ -985,6 +1045,46 @@ function drinkPoison() {
   addMessage(`Ugh! The potion burns your throat. You lose ${damage} HP.`, MSG.bad);
   SOUNDS.drink();
   hurtPlayer(damage, 'potion of poison');
+}
+
+// ---------- Gear ----------
+// player.gear holds what you're wearing in each slot: an item type, or null.
+// A piece's bonus is added straight onto your ATK or DEF when you put it on,
+// and taken off again when you swap it, so fights don't need to know about gear.
+
+// Every slot empty.
+function noGear() {
+  return Object.fromEntries(GEAR_SLOTS.map(slot => [slot, null]));
+}
+
+// Puts on a piece of gear from your pack. Whatever was in that slot is dropped
+// on the floor where you stand: there's no room to carry spares.
+function wearGear(type) {
+  const t = ITEM_TYPES[type];
+  const old = player.gear[t.slot];
+  if (old) {
+    const o = ITEM_TYPES[old];
+    player.atk -= o.atk ?? 0;
+    player.def -= o.def ?? 0;
+    items.push({ type: old, x: player.x, y: player.y });
+  }
+  player.gear[t.slot] = type;
+  player.atk += t.atk ?? 0;
+  player.def += t.def ?? 0;
+
+  const verb = t.slot === 'weapon' ? 'wield' : 'put on';
+  const dropped = old ? ` and drop your ${old}` : '';
+  addMessage(`You ${verb} the ${type} (${gearBonus(type)})${dropped}.`, MSG.item);
+  SOUNDS.equip();
+  return true;
+}
+
+// What a piece of gear adds, as a number (3) and as text ("+3 ATK").
+function gearValue(type) {
+  return ITEM_TYPES[type].atk ?? ITEM_TYPES[type].def;
+}
+function gearBonus(type) {
+  return `+${gearValue(type)} ${ITEM_TYPES[type].atk ? 'ATK' : 'DEF'}`;
 }
 
 // ---------- Throwing ----------
@@ -1470,11 +1570,16 @@ function draw() {
     `ATK ${player.atk}  DEF ${player.def}   ${goal}`;
   status.style.color = hp <= player.maxHp * 0.3 ? '#f66' : '#ccc';
 
-  // Spaces inside each item are non-breaking (' '), so when the pack is too
+  // What you're wearing, slot by slot, e.g. "longsword +3 ATK" or "no shield".
+  document.getElementById('gear').textContent = 'Wearing: ' + GEAR_SLOTS
+    .map(slot => player.gear[slot] ? `${player.gear[slot]} ${gearBonus(player.gear[slot])}` : `no ${slot}`)
+    .join('   ');
+
+  // Spaces inside each item are non-breaking ('\u00a0'), so when the pack is too
   // long for one line it wraps between items, never in the middle of a name.
   document.getElementById('inventory').textContent = 'Pack: ' + (inventory.length === 0
     ? '(empty)'
-    : inventory.map((type, i) => `[${i + 1}] ${itemName(type)}`.replaceAll(' ', ' ')).join('   '));
+    : inventory.map((type, i) => `[${i + 1}] ${itemName(type)}`.replaceAll(' ', '\u00a0')).join('   '));
 
   const log = document.getElementById('log');
   log.replaceChildren(...messages.map(m => {
@@ -1613,10 +1718,10 @@ function drawEndScreen() {
   ctx.fillStyle = won ? '#ffe066' : '#d33';
   ctx.fillText(won ? 'VICTORY' : 'YOU DIED', cx, y);
 
-  // ' ' is a "non-breaking space": wrapText() won't split a line there,
+  // '\u00a0' is a "non-breaking space": wrapText() won't split a line there,
   // so "14 giant rats" always stays together.
   const killList = Object.entries(stats.kills)
-    .map(([name, n]) => `${n} ${name}${n === 1 ? '' : 's'}`.replaceAll(' ', ' '))
+    .map(([name, n]) => `${n} ${name}${n === 1 ? '' : 's'}`.replaceAll(' ', '\u00a0'))
     .join(', ') || 'none';
 
   const lines = [
