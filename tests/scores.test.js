@@ -111,6 +111,23 @@ test('the end screen shows the table and your score', () => {
   assert.equal(rows[0][4], rows[2][4]);
 });
 
+test('a long kill list wraps to fit the screen, without splitting a monster name', () => {
+  const game = startGame();
+  game.peek("stats.kills = { goblin: 7, 'giant rat': 14, rat: 3, slime: 9, orc: 13, bat: 4, spider: 8, crab: 5, ghost: 9, troll: 5, 'old woman': 1 }");
+  die(game);
+  game.calls.length = 0;
+  game.peek('draw()');
+
+  const texts = game.calls.filter(c => c[0] === 'fillText').map(c => c[1]);
+  const width = game.peek('canvas.width');
+  for (const t of texts) assert.ok(t.length * 10 <= width, `too wide: ${t}`);
+  // Every kill is still there, each on one line.
+  const all = texts.join('\n');
+  for (const kill of ['7 goblins', '14 giant rats', '1 old woman']) {
+    assert.ok(all.includes(kill.replaceAll(' ', ' ')), `missing ${kill}`);
+  }
+});
+
 test('a broken score table in storage is treated as empty', () => {
   const game = startGame({ [SCORES_KEY]: 'not json at all' });
   die(game);

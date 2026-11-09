@@ -23,7 +23,8 @@
   canvas.hurt { border-color: #f33; box-shadow: 0 0 14px #f33; }   /* flash when hit */
   p { margin: 8px 0; }
   #status { margin-top: 8px; font-size: 15px; white-space: pre; }   /* pre keeps the spacing */
-  #inventory { margin-top: 4px; color: #aaa; white-space: pre; }
+  /* pre-wrap keeps the spacing like pre, but lets long packs wrap at the canvas width */
+  #inventory { margin-top: 4px; color: #aaa; white-space: pre-wrap; max-width: 960px; text-align: center; }
   #log {
     width: 960px;
     /* Room for the 6 messages the log keeps (6 lines of 1.25em), plus the
@@ -1469,9 +1470,11 @@ function draw() {
     `ATK ${player.atk}  DEF ${player.def}   ${goal}`;
   status.style.color = hp <= player.maxHp * 0.3 ? '#f66' : '#ccc';
 
+  // Spaces inside each item are non-breaking (' '), so when the pack is too
+  // long for one line it wraps between items, never in the middle of a name.
   document.getElementById('inventory').textContent = 'Pack: ' + (inventory.length === 0
     ? '(empty)'
-    : inventory.map((type, i) => `[${i + 1}] ${itemName(type)}`).join('   '));
+    : inventory.map((type, i) => `[${i + 1}] ${itemName(type)}`.replaceAll(' ', ' ')).join('   '));
 
   const log = document.getElementById('log');
   log.replaceChildren(...messages.map(m => {
@@ -1579,6 +1582,25 @@ function drawFullMap() {
   ctx.fillText(`Map of floor ${depth}  ·  M or Esc to close`, canvas.width / 2, 13);
 }
 
+// Splits text into lines no wider than maxWidth pixels (in the current ctx.font).
+// It only breaks at ordinary spaces, adding one word at a time until the next
+// word wouldn't fit, then starting a new line.
+function wrapText(text, maxWidth) {
+  const lines = [];
+  let line = '';
+  for (const word of text.split(' ')) {
+    const longer = line ? line + ' ' + word : word;
+    if (line && ctx.measureText(longer).width > maxWidth) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = longer;
+    }
+  }
+  lines.push(line);
+  return lines;
+}
+
 // Darkens the map and shows how the run went, plus the best runs so far.
 function drawEndScreen() {
   ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
@@ -1591,8 +1613,10 @@ function drawEndScreen() {
   ctx.fillStyle = won ? '#ffe066' : '#d33';
   ctx.fillText(won ? 'VICTORY' : 'YOU DIED', cx, y);
 
+  // ' ' is a "non-breaking space": wrapText() won't split a line there,
+  // so "14 giant rats" always stays together.
   const killList = Object.entries(stats.kills)
-    .map(([name, n]) => `${n} ${name}${n === 1 ? '' : 's'}`)
+    .map(([name, n]) => `${n} ${name}${n === 1 ? '' : 's'}`.replaceAll(' ', ' '))
     .join(', ') || 'none';
 
   const lines = [
@@ -1606,8 +1630,11 @@ function drawEndScreen() {
   ctx.fillStyle = '#ccc';
   y += 50;
   for (const line of lines) {
-    ctx.fillText(line, cx, y);
-    y += 24;
+    // Long lines (like a big kill list) are broken up to fit inside the canvas.
+    for (const part of wrapText(line, canvas.width - 40)) {
+      ctx.fillText(part, cx, y);
+      y += 24;
+    }
   }
 
   if (lastRun) {

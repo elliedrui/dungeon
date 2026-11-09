@@ -24,6 +24,7 @@ function startGame(saved = {}) {
     drawImage: (...args) => calls.push(['drawImage', ...args]),
     fillRect: (...args) => calls.push(['fillRect', ...args, ctx.fillStyle]),
     fillText: (...args) => calls.push(['fillText', ...args, ctx.fillStyle]),
+    measureText: text => ({ width: text.length * 10 }),   // about right for 16px monospace
   };
   const element = () => ({
     textContent: '', style: {}, replaceChildren() {},
