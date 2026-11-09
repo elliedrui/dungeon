@@ -124,7 +124,7 @@ test('a long kill list wraps to fit the screen, without splitting a monster name
   // Every kill is still there, each on one line.
   const all = texts.join('\n');
   for (const kill of ['7 goblins', '14 giant rats', '1 old woman']) {
-    assert.ok(all.includes(kill.replaceAll(' ', ' ')), `missing ${kill}`);
+    assert.ok(all.includes(kill.replaceAll(' ', '\u00a0')), `missing ${kill}`);
   }
 });
 
