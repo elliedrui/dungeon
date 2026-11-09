@@ -2,7 +2,7 @@
 // AudioContext that records what each sound asks for and checks it would be
 // valid in a real browser. (Whether it sounds good is up to your ears: open
 // the game as index.html#sounds to try every sound.)
-// Run from the repo root with:  node --test tests/
+// Run from the repo root with:  node --test
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

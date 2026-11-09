@@ -6,7 +6,7 @@
 //   7-8   - makes you forget your map of this floor
 //   9-10  - summons 2 rats or bats next to her
 //   11-20 - no spell; she acts like any other monster
-// Run from the repo root with:  node --test tests/
+// Run from the repo root with:  node --test
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

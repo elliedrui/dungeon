@@ -1,5 +1,5 @@
 // Tests for the sprite graphics: drawTile(), the G toggle, and the text-mode fallback.
-// Run from the repo root with:  node --test tests/
+// Run from the repo root with:  node --test
 //
 // The setup that runs the game in Node is in helpers.js.
 

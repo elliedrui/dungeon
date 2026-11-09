@@ -1,6 +1,6 @@
 // Tests for monsters getting stronger deeper down: +1 attack for each floor
 // below floor 1. This keeps up with the +1 DEF the player gets from the stairs.
-// Run from the repo root with:  node --test tests/
+// Run from the repo root with:  node --test
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

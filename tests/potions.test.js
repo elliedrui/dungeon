@@ -1,5 +1,5 @@
 // Tests for the potion of defense, and for potions in general.
-// Run from the repo root with:  node --test tests/
+// Run from the repo root with:  node --test
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

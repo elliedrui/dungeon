@@ -1,7 +1,7 @@
 // Tests for throwing potions: press T, then a pack number (1-9), then a direction.
 // The potion flies up to THROW_RANGE tiles and smashes on the first monster in
 // its way: poison hurts it, healing heals it, strength makes it stronger.
-// Run from the repo root with:  node --test tests/
+// Run from the repo root with:  node --test
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

@@ -1,7 +1,7 @@
 // Tests for the high-score table: the best 5 runs, kept in the browser even
 // after the saved game is deleted. The end screen shows the table.
 //   Score = 100 per floor reached + 10 per kill + 500 for winning.
-// Run from the repo root with:  node --test tests/
+// Run from the repo root with:  node --test
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

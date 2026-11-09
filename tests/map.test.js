@@ -1,6 +1,6 @@
 // Tests for the full map: press M to see the whole floor, shrunk to fit the
 // screen. It only shows tiles you've explored. (Sound on/off moved to V.)
-// Run from the repo root with:  node --test tests/
+// Run from the repo root with:  node --test
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

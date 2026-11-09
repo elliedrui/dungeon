@@ -2,7 +2,7 @@
 //   Thrown: the monster it hits flies 3 more tiles the way the potion was going.
 //   Drunk:  every monster next to you is blown 3 tiles away from you.
 // Either way it stops early at a wall or another monster, and does no damage.
-// Run from the repo root with:  node --test tests/
+// Run from the repo root with:  node --test
 //
 // These tests use slimes: they're slow, so they rest on the turn after they
 // wake up and stay where the wind left them.

@@ -3,7 +3,7 @@
 //   Further away, every 3 actions it casts a spell (if it can see you):
 //     30% of the time it summons ghosts, otherwise it throws a fire bolt that ignores DEF.
 //   Below half health it flies into a rage and acts twice a turn.
-// Run from the repo root with:  node --test tests/
+// Run from the repo root with:  node --test
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

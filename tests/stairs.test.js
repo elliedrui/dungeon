@@ -1,7 +1,7 @@
 // Tests for the stairs boost: +5 max HP, +1 ATK and +1 DEF, but only the first time
 // you reach a floor. (The old woman can send you back to floor 1, and walking
 // down again shouldn't hand out the same boosts twice.)
-// Run from the repo root with:  node --test tests/
+// Run from the repo root with:  node --test
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

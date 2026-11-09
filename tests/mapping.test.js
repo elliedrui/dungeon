@@ -1,5 +1,5 @@
 // Tests for the scroll of mapping: reading it reveals the whole floor on the map.
-// Run from the repo root with:  node --test tests/
+// Run from the repo root with:  node --test
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

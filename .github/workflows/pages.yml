@@ -28,7 +28,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-      - run: node --test tests/
+      - run: node --test
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:
