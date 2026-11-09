@@ -127,7 +127,8 @@ const ITEM_TYPES = {
   scroll:    { name: 'scroll of lightning', ch: '?', color: '#6cf', sprite: 6, use: readLightning },
   mapping:   { name: 'scroll of mapping',   ch: '?', color: '#fd6', sprite: 6, use: readMapping },
 
-  // Gear: weapons, armor, shields and helmets. Using one puts it on (see wearGear).
+  // Gear: weapons, armor, shields and helmets. Stepping on better gear puts it on
+  // (see pickUpItem and wearGear); `use` is only for gear already in an old save's pack.
   // `slot` is where it's worn, `atk`/`def` is what it adds while you wear it, and
   // `depth` is the first floor it can be found on: better gear lies deeper.
   // Text-mode colors go by material: leather/wood, iron, steel, then gold trim.
@@ -958,11 +959,17 @@ function pickUpItem() {
   const item = items.find(i => i.x === player.x && i.y === player.y);
   if (!item) return;
   const name = itemName(item.type);
-  // Gear that's no better than what you're wearing stays on the floor, so it
-  // doesn't fill your pack.
-  const worn = ITEM_TYPES[item.type].slot && player.gear[ITEM_TYPES[item.type].slot];
-  if (worn && gearValue(item.type) <= gearValue(worn)) {
-    addMessage(`You see ${withArticle(name)} (${gearBonus(item.type)}), no better than your ${worn} (${gearBonus(worn)}).`);
+  // Gear never goes in your pack. If it's better than what you're wearing (or
+  // that slot is empty), you put it on right away. If not, it stays on the floor.
+  const slot = ITEM_TYPES[item.type].slot;
+  if (slot) {
+    const worn = player.gear[slot];
+    if (worn && gearValue(item.type) <= gearValue(worn)) {
+      addMessage(`You see ${withArticle(name)} (${gearBonus(item.type)}), no better than your ${worn} (${gearBonus(worn)}).`);
+      return;
+    }
+    items = items.filter(i => i !== item);   // off the floor first, so the old piece can drop here
+    wearGear(item.type);
     return;
   }
   if (inventory.length >= INVENTORY_SIZE) {
@@ -1057,8 +1064,8 @@ function noGear() {
   return Object.fromEntries(GEAR_SLOTS.map(slot => [slot, null]));
 }
 
-// Puts on a piece of gear from your pack. Whatever was in that slot is dropped
-// on the floor where you stand: there's no room to carry spares.
+// Puts on a piece of gear (from the floor, or an old save's pack). Whatever was
+// in that slot is dropped on the floor where you stand: no room to carry spares.
 function wearGear(type) {
   const t = ITEM_TYPES[type];
   const old = player.gear[t.slot];

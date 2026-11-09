@@ -1,21 +1,23 @@
-// Tests for gear: weapons, armor, shields and helmets. You pick gear up like
-// any item, then press its number to put it on. Whatever you were wearing in
-// that slot is dropped at your feet.
+// Tests for gear: weapons, armor, shields and helmets. Gear never goes in your
+// pack: step on a piece that's better than what you're wearing and you put it
+// on, dropping the old one at your feet. Worse gear stays on the floor.
 // Run from the repo root with:  node --test
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { startGame, openFloor, withRandom } = require('./helpers');
 
-// A game on an open floor with no monsters and the given pack.
-function field(pack) {
+// A game on an open floor with no monsters, the player at (10, 10), and the
+// given gear lying in a row to the right: (11, 10), (12, 10), ...
+function field(...gear) {
   const game = startGame();
   openFloor(game);
-  game.peek(`inventory = ${JSON.stringify(pack)}`);
+  game.peek(`inventory = []; items = ${JSON.stringify(gear.map((type, i) => ({ type, x: 11 + i, y: 10 })))}`);
   return game;
 }
 
 const stats = game => game.peek('({ atk: player.atk, def: player.def })');
+const lastMessage = game => game.peek('messages.at(-1).text');
 
 test('a new game starts with nothing worn', () => {
   const game = startGame();
@@ -24,61 +26,72 @@ test('a new game starts with nothing worn', () => {
     'Wearing: no weapon   no armor   no shield   no helmet');
 });
 
-test('pressing its number puts gear on, adds its bonus and spends a turn', () => {
-  const game = field(['longsword', 'chain mail']);
+test('stepping on gear puts it on straight away, without using the pack', () => {
+  const game = field('longsword', 'chain mail');
   const before = stats(game);
-  const turns = game.peek('stats.turns');
 
-  game.press('1');
+  game.press('d');
   assert.equal(game.peek('player.gear.weapon'), 'longsword');
   assert.deepEqual(stats(game), { atk: before.atk + 3, def: before.def });
-  assert.deepEqual(game.peek('inventory'), ['chain mail']);
-  assert.equal(game.peek('stats.turns'), turns + 1);
+  assert.match(lastMessage(game), /You wield the longsword \(\+3 ATK\)/);
 
   // Gear in other slots adds up.
-  game.press('1');
+  game.press('d');
   assert.deepEqual(stats(game), { atk: before.atk + 3, def: before.def + 3 });
+  assert.deepEqual(game.peek('inventory'), []);
+  assert.deepEqual(game.peek('items'), []);
   assert.match(game.peek("document.getElementById('gear').textContent"), /longsword \+3 ATK   chain mail \+3 DEF/);
 });
 
-test('swapping gear drops the old piece at your feet, and its bonus goes with it', () => {
-  const game = field(['dagger', 'battle axe']);
+test('better gear swaps in, dropping the old piece where you stand', () => {
+  const game = field('dagger', 'battle axe');
   const before = stats(game);
-  game.press('1');
-  game.press('1');
+  game.press('d');
+  game.press('d');
 
   assert.equal(game.peek('player.gear.weapon'), 'battle axe');
   assert.deepEqual(stats(game), { atk: before.atk + 4, def: before.def });   // not +5
-  assert.deepEqual(game.peek('inventory'), []);
-  assert.deepEqual(game.peek('items'), [{ type: 'dagger', x: 10, y: 10 }]);
-  assert.match(game.peek('messages.at(-1).text'), /wield the battle axe \(\+4 ATK\) and drop your dagger/);
+  assert.deepEqual(game.peek('items'), [{ type: 'dagger', x: 12, y: 10 }]);
+  assert.match(lastMessage(game), /wield the battle axe \(\+4 ATK\) and drop your dagger/);
 });
 
 test('gear no better than what you wear is left on the floor', () => {
-  const game = field(['buckler', 'tower shield']);
-  game.press('1');
-  game.press('1');   // the buckler is dropped here
-  game.press('d');   // step off
-  game.press('a');   // and back on
-  assert.deepEqual(game.peek('inventory'), []);
-  assert.deepEqual(game.peek('items.map(i => i.type)'), ['buckler']);
-  assert.match(game.peek('messages.at(-1).text'),
-    /You see a buckler \(\+1 DEF\), no better than your tower shield \(\+2 DEF\)/);
-
-  // Same bonus counts as no better, too.
-  game.peek("items = [{ type: 'round shield', x: player.x + 1, y: player.y }]");
-  game.press('d');
-  assert.deepEqual(game.peek('inventory'), []);
+  const game = field('tower shield', 'buckler', 'kite shield');
+  game.press('d');   // tower shield, +2
+  game.press('d');   // buckler, +1: worse
+  assert.equal(game.peek('player.gear.shield'), 'tower shield');
+  assert.match(lastMessage(game), /You see a buckler \(\+1 DEF\), no better than your tower shield \(\+2 DEF\)/);
+  game.press('d');   // kite shield, +2: the same counts as no better
+  assert.equal(game.peek('player.gear.shield'), 'tower shield');
+  assert.deepEqual(game.peek('items.map(i => i.type)'), ['buckler', 'kite shield']);
 });
 
-test('better gear, or gear for an empty slot, is picked up', () => {
-  const game = field(['dagger']);
+test('the old piece you dropped is not picked up again', () => {
+  const game = field('leather cap', 'great helm');
+  game.press('d');
+  game.press('d');   // the leather cap is dropped here
+  game.press('a');
+  game.press('d');   // back onto it
+  assert.equal(game.peek('player.gear.helmet'), 'great helm');
+  assert.deepEqual(game.peek('items.map(i => i.type)'), ['leather cap']);
+});
+
+test('a full pack does not stop you putting on gear', () => {
+  const game = field('plate armor');
+  game.peek("inventory = Array(INVENTORY_SIZE).fill('healing')");
+  game.press('d');
+  assert.equal(game.peek('player.gear.armor'), 'plate armor');
+  assert.equal(game.peek('inventory.length'), game.peek('INVENTORY_SIZE'));
+});
+
+test('gear already in the pack (from an old save) is put on with its number, spending a turn', () => {
+  const game = field();
+  game.peek("inventory = ['short sword']");
+  const turns = game.peek('stats.turns');
   game.press('1');
-  game.peek(`items = [{ type: 'longsword', x: player.x + 1, y: player.y },
-                      { type: 'leather cap', x: player.x + 2, y: player.y }]`);
-  game.press('d');
-  game.press('d');
-  assert.deepEqual(game.peek('inventory'), ['longsword', 'leather cap']);
+  assert.equal(game.peek('player.gear.weapon'), 'short sword');
+  assert.deepEqual(game.peek('inventory'), []);
+  assert.equal(game.peek('stats.turns'), turns + 1);
 });
 
 test('each floor has gear lying around, better the deeper you go', () => {
@@ -102,8 +115,8 @@ test('every slot has gear for every tier, so nothing is missing from the table',
 });
 
 test('gear stays on when you take the stairs, and is saved', () => {
-  const game = field(['iron helm']);
-  game.press('1');
+  const game = field('iron helm');
+  game.press('d');
   game.peek('stairs = { x: player.x, y: player.y }');
   withRandom(0.5, () => game.press('>'));
   assert.equal(game.peek('player.gear.helmet'), 'iron helm');
@@ -118,17 +131,6 @@ test('a save from before gear still loads, wearing nothing', () => {
   const save = JSON.parse(old.storage.get('dungeon-crawler-save'));
   delete save.player.gear;
   const game = startGame({ 'dungeon-crawler-save': JSON.stringify(save) });
-  assert.equal(game.peek('messages.at(-1).text'), 'Welcome back. Your game was restored.');
+  assert.equal(lastMessage(game), 'Welcome back. Your game was restored.');
   assert.deepEqual(game.peek('player.gear'), { weapon: null, armor: null, shield: null, helmet: null });
-  game.peek("inventory = ['dagger']");
-  game.press('1');
-  assert.equal(game.peek('player.gear.weapon'), 'dagger');
-});
-
-test('gear cannot be thrown', () => {
-  const game = field(['dagger', 'healing']);
-  game.press('t');
-  game.press('1');
-  assert.match(game.peek('messages.at(-1).text'), /only throw potions/);
-  assert.deepEqual(game.peek('inventory'), ['dagger', 'healing']);
 });
